@@ -1,0 +1,28 @@
+{
+  "name": "expensetrack1-backend",
+  "version": "1.0.0",
+  "description": "Production-ready Node.js Express backend for STS FINTECH PRIVATE LIMITED",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.9"
+  },
+  "keywords": [
+    "fintech",
+    "express",
+    "postgresql",
+    "payment-tracking",
+    "sts-fintech"
+  ],
+  "author": "STS FINTECH PRIVATE LIMITED",
+  "license": "ISC"
+}
