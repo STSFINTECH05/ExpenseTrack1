@@ -44,10 +44,10 @@ app.use((req, res, next) => {
   next();
 });
 
-// Auto-initialize the payments table on startup
+// Auto-initialize PostgreSQL tables on startup
 const initDatabase = async () => {
   if (isDatabaseConfigured && pool) {
-    const createTableQuery = `
+    const createPaymentsTableQuery = `
       CREATE TABLE IF NOT EXISTS payments (
         id SERIAL PRIMARY KEY,
         title VARCHAR(255) NOT NULL,
@@ -56,11 +56,29 @@ const initDatabase = async () => {
         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
       );
     `;
+
+    const createFinanceRecordsTableQuery = `
+      CREATE TABLE IF NOT EXISTS finance_records (
+        id SERIAL PRIMARY KEY,
+        type VARCHAR(50) NOT NULL,
+        name VARCHAR(255) NOT NULL,
+        description TEXT,
+        date DATE,
+        time VARCHAR(50),
+        schedule VARCHAR(100),
+        category VARCHAR(100),
+        associated_wallet VARCHAR(100),
+        amount NUMERIC(12, 2) NOT NULL DEFAULT 0.00,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+      );
+    `;
+
     try {
-      await pool.query(createTableQuery);
-      console.log('✅ [STS FINTECH] PostgreSQL "payments" table verified and ready.');
+      await pool.query(createPaymentsTableQuery);
+      await pool.query(createFinanceRecordsTableQuery);
+      console.log('✅ [STS FINTECH] PostgreSQL "payments" & "finance_records" tables verified.');
     } catch (error) {
-      console.error('❌ [STS FINTECH] Error initializing payments table:', error.message);
+      console.error('❌ [STS FINTECH] Error initializing tables:', error.message);
     }
   } else {
     console.log('ℹ️ [STS FINTECH] Running in memory-backed mode (DATABASE_URL not supplied).');
@@ -99,7 +117,6 @@ app.get('/api/payments', async (req, res) => {
     `;
     const result = await query(selectQuery);
 
-    // Format amounts as numbers for consistent frontend consumption
     const formattedRows = result.rows.map((row) => ({
       ...row,
       amount: parseFloat(row.amount),
@@ -129,7 +146,6 @@ app.post('/api/payments', async (req, res) => {
   try {
     const { title, amount, status = 'completed' } = req.body;
 
-    // Validation
     const errors = [];
     if (!title || typeof title !== 'string' || title.trim().length === 0) {
       errors.push('Payment title is required and must be a non-empty string.');
@@ -186,6 +202,141 @@ app.post('/api/payments', async (req, res) => {
   }
 });
 
+/**
+ * GET /api/segregation
+ * Retrieve finance segregation records, with optional ?type= filter
+ * (e.g., 'additional_income', 'additional_expense', 'fixed_income', 'fixed_expense', 'bill')
+ */
+app.get('/api/segregation', async (req, res) => {
+  try {
+    const { type } = req.query;
+    let result;
+
+    if (type) {
+      const selectQuery = `
+        SELECT id, type, name, description, date, time, schedule, category, associated_wallet, amount, created_at
+        FROM finance_records
+        WHERE type = $1
+        ORDER BY date DESC, created_at DESC;
+      `;
+      result = await query(selectQuery, [type]);
+    } else {
+      const selectQuery = `
+        SELECT id, type, name, description, date, time, schedule, category, associated_wallet, amount, created_at
+        FROM finance_records
+        ORDER BY date DESC, created_at DESC;
+      `;
+      result = await query(selectQuery);
+    }
+
+    const formattedRows = result.rows.map((row) => ({
+      ...row,
+      amount: parseFloat(row.amount) || 0,
+      date: row.date ? (typeof row.date === 'string' ? row.date.split('T')[0] : new Date(row.date).toISOString().split('T')[0]) : null,
+    }));
+
+    return res.status(200).json({
+      success: true,
+      count: formattedRows.length,
+      data: formattedRows,
+      company: COMPANY_NAME,
+    });
+  } catch (error) {
+    console.error('Error fetching segregation records:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to retrieve segregation records',
+      error: error.message,
+    });
+  }
+});
+
+/**
+ * POST /api/segregation
+ * Validate and persist new finance records submitted from UI modal
+ */
+app.post('/api/segregation', async (req, res) => {
+  try {
+    const {
+      type,
+      name,
+      description = '',
+      date,
+      time,
+      schedule = 'One-time',
+      category = 'General',
+      associated_wallet = 'Primary Wallet',
+      amount = 0,
+    } = req.body;
+
+    const errors = [];
+    const validTypes = ['additional_income', 'additional_expense', 'fixed_income', 'fixed_expense', 'bill'];
+
+    if (!type || !validTypes.includes(type)) {
+      errors.push(`Type is required and must be one of: ${validTypes.join(', ')}.`);
+    }
+
+    if (!name || typeof name !== 'string' || name.trim().length === 0) {
+      errors.push('Record name is required.');
+    }
+
+    const numericAmount = parseFloat(amount);
+    if (isNaN(numericAmount) || numericAmount < 0) {
+      errors.push('Amount must be a valid positive number or 0.');
+    }
+
+    if (errors.length > 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Validation failed',
+        errors,
+      });
+    }
+
+    const cleanDate = date || new Date().toISOString().split('T')[0];
+    const cleanTime = time || new Date().toTimeString().slice(0, 5);
+
+    const insertQuery = `
+      INSERT INTO finance_records (type, name, description, date, time, schedule, category, associated_wallet, amount)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      RETURNING id, type, name, description, date, time, schedule, category, associated_wallet, amount, created_at;
+    `;
+
+    const result = await query(insertQuery, [
+      type,
+      name.trim(),
+      description.trim(),
+      cleanDate,
+      cleanTime,
+      schedule,
+      category,
+      associated_wallet,
+      numericAmount,
+    ]);
+
+    const createdRecord = {
+      ...result.rows[0],
+      amount: parseFloat(result.rows[0].amount),
+    };
+
+    console.log(`[STS FINTECH] Segregation record created: ${createdRecord.type} - "${createdRecord.name}" (₹${createdRecord.amount})`);
+
+    return res.status(201).json({
+      success: true,
+      message: 'Finance record created successfully',
+      data: createdRecord,
+      company: COMPANY_NAME,
+    });
+  } catch (error) {
+    console.error('Error creating segregation record:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Internal server error while creating finance record',
+      error: error.message,
+    });
+  }
+});
+
 // Root route
 app.get('/', (req, res) => {
   res.json({
@@ -194,6 +345,8 @@ app.get('/', (req, res) => {
       health: 'GET /api/health',
       payments: 'GET /api/payments',
       createPayment: 'POST /api/payments',
+      segregation: 'GET /api/segregation',
+      createSegregation: 'POST /api/segregation',
     },
   });
 });

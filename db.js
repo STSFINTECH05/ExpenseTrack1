@@ -39,7 +39,7 @@ if (databaseUrl && databaseUrl.trim() !== '') {
   console.warn('[STS FINTECH DB] Warning: DATABASE_URL is not set. Operating in fallback mode.');
 }
 
-// In-memory fallback store when local PostgreSQL is not configured yet
+// In-memory fallback stores when local PostgreSQL is not configured yet
 let inMemoryPayments = [
   {
     id: 1,
@@ -64,7 +64,119 @@ let inMemoryPayments = [
   }
 ];
 
-let nextId = 4;
+let inMemoryFinanceRecords = [
+  // Additional Income
+  {
+    id: 1,
+    type: 'additional_income',
+    name: 'Freelance Tech Advisory',
+    description: 'Advisory on High-Frequency Routing for Client X',
+    date: '2026-10-05',
+    time: '14:30',
+    schedule: 'One-time',
+    category: 'Consulting',
+    associated_wallet: 'HDFC Corporate',
+    amount: 35000.00,
+    created_at: new Date(Date.now() - 3600000 * 48).toISOString(),
+  },
+  {
+    id: 2,
+    type: 'additional_income',
+    name: 'Mutual Fund Dividend Yield',
+    description: 'Quarterly payout from liquid debt fund',
+    date: '2026-10-02',
+    time: '11:15',
+    schedule: 'Quarterly',
+    category: 'Investment',
+    associated_wallet: 'Zerodha Escrow',
+    amount: 12500.00,
+    created_at: new Date(Date.now() - 3600000 * 120).toISOString(),
+  },
+  // Additional Expense
+  {
+    id: 3,
+    type: 'additional_expense',
+    name: 'AWS Elastic GPU Cluster',
+    description: 'Model inference workload compute overages',
+    date: '2026-10-06',
+    time: '18:00',
+    schedule: 'One-time',
+    category: 'Infrastructure',
+    associated_wallet: 'ICICI Corporate',
+    amount: 9400.00,
+    created_at: new Date(Date.now() - 3600000 * 24).toISOString(),
+  },
+  {
+    id: 4,
+    type: 'additional_expense',
+    name: 'Engineering Sprint Lunch',
+    description: 'Milestone celebration dinner for 12 engineers',
+    date: '2026-10-04',
+    time: '20:30',
+    schedule: 'One-time',
+    category: 'Operations',
+    associated_wallet: 'Petty Cash',
+    amount: 4200.00,
+    created_at: new Date(Date.now() - 3600000 * 72).toISOString(),
+  },
+  // Fixed Income
+  {
+    id: 5,
+    type: 'fixed_income',
+    name: 'STS Core Retainer Contract',
+    description: 'Enterprise API integration retainer SLA',
+    date: '2026-10-01',
+    time: '09:00',
+    schedule: 'Monthly (1st)',
+    category: 'Retainer',
+    associated_wallet: 'HDFC Corporate',
+    amount: 185000.00,
+    created_at: new Date(Date.now() - 3600000 * 150).toISOString(),
+  },
+  {
+    id: 6,
+    type: 'fixed_income',
+    name: 'SaaS Platform License Tier',
+    description: 'Institutional trading platform licensing fee',
+    date: '2026-10-01',
+    time: '09:30',
+    schedule: 'Monthly (1st)',
+    category: 'Software Subscription',
+    associated_wallet: 'Razorpay Business',
+    amount: 95000.00,
+    created_at: new Date(Date.now() - 3600000 * 149).toISOString(),
+  },
+  // Fixed Expense
+  {
+    id: 7,
+    type: 'fixed_expense',
+    name: 'Tech Park Corporate Office Lease',
+    description: 'Corporate headquarters 4th floor facilities',
+    date: '2026-10-01',
+    time: '10:00',
+    schedule: 'Monthly (1st)',
+    category: 'Office Rent',
+    associated_wallet: 'HDFC Corporate',
+    amount: 65000.00,
+    created_at: new Date(Date.now() - 3600000 * 148).toISOString(),
+  },
+  {
+    id: 8,
+    type: 'fixed_expense',
+    name: 'Core Engineering Payroll Batch',
+    description: 'Fixed salaries base for software developers',
+    date: '2026-10-01',
+    time: '11:00',
+    schedule: 'Monthly (1st)',
+    category: 'Payroll',
+    associated_wallet: 'HDFC Corporate',
+    amount: 140000.00,
+    created_at: new Date(Date.now() - 3600000 * 147).toISOString(),
+  },
+];
+
+let nextPaymentId = 4;
+let nextFinanceRecordId = 9;
 
 const query = async (text, params = []) => {
   if (pool) {
@@ -78,6 +190,38 @@ const query = async (text, params = []) => {
 
   // Fallback simulator for development without an active PostgreSQL instance
   const normalized = text.trim().toUpperCase();
+
+  // 1. Finance Records table queries
+  if (normalized.includes('FINANCE_RECORDS')) {
+    if (normalized.startsWith('SELECT')) {
+      let filtered = [...inMemoryFinanceRecords];
+      if (normalized.includes('WHERE TYPE =') && params.length > 0) {
+        const filterType = params[0];
+        filtered = filtered.filter((r) => r.type === filterType);
+      }
+      filtered.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+      return { rows: filtered, rowCount: filtered.length };
+    } else if (normalized.startsWith('INSERT')) {
+      const [type, name, description, date, time, schedule, category, associated_wallet, amount] = params;
+      const newRec = {
+        id: nextFinanceRecordId++,
+        type,
+        name,
+        description: description || '',
+        date: date || new Date().toISOString().split('T')[0],
+        time: time || new Date().toTimeString().slice(0, 5),
+        schedule: schedule || 'One-time',
+        category: category || 'General',
+        associated_wallet: associated_wallet || 'Primary Account',
+        amount: parseFloat(amount) || 0.0,
+        created_at: new Date().toISOString(),
+      };
+      inMemoryFinanceRecords.unshift(newRec);
+      return { rows: [newRec], rowCount: 1 };
+    }
+  }
+
+  // 2. Payments table queries
   if (normalized.startsWith('SELECT')) {
     const sorted = [...inMemoryPayments].sort(
       (a, b) => new Date(b.created_at) - new Date(a.created_at)
@@ -86,7 +230,7 @@ const query = async (text, params = []) => {
   } else if (normalized.startsWith('INSERT')) {
     const [title, amount, status] = params;
     const newRecord = {
-      id: nextId++,
+      id: nextPaymentId++,
       title,
       amount: parseFloat(amount),
       status: status || 'completed',
