@@ -73,10 +73,23 @@ const initDatabase = async () => {
       );
     `;
 
+    const createGoalWalletsTableQuery = `
+      CREATE TABLE IF NOT EXISTS goal_wallets (
+        id SERIAL PRIMARY KEY,
+        name VARCHAR(255) NOT NULL,
+        target_amount NUMERIC(12, 2) NOT NULL DEFAULT 0.00,
+        saved_amount NUMERIC(12, 2) NOT NULL DEFAULT 0.00,
+        description TEXT,
+        status VARCHAR(50) DEFAULT 'in_progress',
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+      );
+    `;
+
     try {
       await pool.query(createPaymentsTableQuery);
       await pool.query(createFinanceRecordsTableQuery);
-      console.log('✅ [STS FINTECH] PostgreSQL "payments" & "finance_records" tables verified.');
+      await pool.query(createGoalWalletsTableQuery);
+      console.log('✅ [STS FINTECH] PostgreSQL "payments", "finance_records" & "goal_wallets" tables verified.');
     } catch (error) {
       console.error('❌ [STS FINTECH] Error initializing tables:', error.message);
     }
@@ -235,10 +248,13 @@ app.get('/api/segregation', async (req, res) => {
       date: row.date ? (typeof row.date === 'string' ? row.date.split('T')[0] : new Date(row.date).toISOString().split('T')[0]) : null,
     }));
 
+    // Filter duplicates by unique id or name before sending response
+    const uniqueRows = Array.from(new Map(formattedRows.map((item) => [item.id || item.name, item])).values());
+
     return res.status(200).json({
       success: true,
-      count: formattedRows.length,
-      data: formattedRows,
+      count: uniqueRows.length,
+      data: uniqueRows,
       company: COMPANY_NAME,
     });
   } catch (error) {
@@ -332,6 +348,325 @@ app.post('/api/segregation', async (req, res) => {
     return res.status(500).json({
       success: false,
       message: 'Internal server error while creating finance record',
+      error: error.message,
+    });
+  }
+});
+
+/**
+ * PUT /api/segregation/:id
+ * Update an existing finance record
+ */
+app.put('/api/segregation/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const {
+      name,
+      description = '',
+      date,
+      time,
+      schedule = 'One-time',
+      category = 'General',
+      associated_wallet = 'Primary Wallet',
+      amount = 0,
+    } = req.body;
+
+    if (!name || typeof name !== 'string' || name.trim().length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Record name is required.',
+      });
+    }
+
+    const numericAmount = parseFloat(amount);
+    if (isNaN(numericAmount) || numericAmount < 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Amount must be a valid positive number.',
+      });
+    }
+
+    const cleanDate = date || new Date().toISOString().split('T')[0];
+    const cleanTime = time || new Date().toTimeString().slice(0, 5);
+
+    const updateQuery = `
+      UPDATE finance_records
+      SET name = $1, description = $2, date = $3, time = $4, schedule = $5, category = $6, associated_wallet = $7, amount = $8
+      WHERE id = $9
+      RETURNING id, type, name, description, date, time, schedule, category, associated_wallet, amount, created_at;
+    `;
+
+    const result = await query(updateQuery, [
+      name.trim(),
+      description.trim(),
+      cleanDate,
+      cleanTime,
+      schedule,
+      category,
+      associated_wallet,
+      numericAmount,
+      parseInt(id, 10),
+    ]);
+
+    if (!result.rows || result.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Record not found',
+      });
+    }
+
+    const updatedRecord = {
+      ...result.rows[0],
+      amount: parseFloat(result.rows[0].amount),
+      date: result.rows[0].date ? (typeof result.rows[0].date === 'string' ? result.rows[0].date.split('T')[0] : new Date(result.rows[0].date).toISOString().split('T')[0]) : null,
+    };
+
+    console.log(`[STS FINTECH] Segregation record updated: ID ${id} - "${updatedRecord.name}" (₹${updatedRecord.amount})`);
+
+    return res.status(200).json({
+      success: true,
+      message: 'Finance record updated successfully',
+      data: updatedRecord,
+      company: COMPANY_NAME,
+    });
+  } catch (error) {
+    console.error('Error updating segregation record:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Internal server error while updating finance record',
+      error: error.message,
+    });
+  }
+});
+
+/**
+ * DELETE /api/segregation/:id
+ * Remove a finance record
+ */
+app.delete('/api/segregation/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const deleteQuery = `DELETE FROM finance_records WHERE id = $1 RETURNING id;`;
+    const result = await query(deleteQuery, [parseInt(id, 10)]);
+
+    if (!result.rows || result.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Record not found',
+      });
+    }
+
+    console.log(`[STS FINTECH] Segregation record deleted: ID ${id}`);
+
+    return res.status(200).json({
+      success: true,
+      message: 'Finance record deleted successfully',
+      id: parseInt(id, 10),
+      company: COMPANY_NAME,
+    });
+  } catch (error) {
+    console.error('Error deleting segregation record:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Internal server error while deleting finance record',
+      error: error.message,
+    });
+  }
+});
+
+/**
+ * GET /api/wallets
+ * Retrieve all segregated goal wallets
+ */
+app.get('/api/wallets', async (req, res) => {
+  try {
+    const selectQuery = `
+      SELECT id, name, target_amount, saved_amount, description, status, created_at
+      FROM goal_wallets
+      ORDER BY created_at DESC;
+    `;
+    const result = await query(selectQuery);
+
+    const formattedRows = result.rows.map((row) => ({
+      ...row,
+      target_amount: parseFloat(row.target_amount) || 0,
+      saved_amount: parseFloat(row.saved_amount) || 0,
+    }));
+
+    return res.status(200).json({
+      success: true,
+      count: formattedRows.length,
+      data: formattedRows,
+      company: COMPANY_NAME,
+    });
+  } catch (error) {
+    console.error('Error fetching goal wallets:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to retrieve goal wallets',
+      error: error.message,
+    });
+  }
+});
+
+/**
+ * POST /api/wallets
+ * Setup a new purpose target wallet
+ */
+app.post('/api/wallets', async (req, res) => {
+  try {
+    const { name, target_amount, description = '' } = req.body;
+
+    if (!name || typeof name !== 'string' || name.trim().length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Purpose / Item name is required.',
+      });
+    }
+
+    const numericTarget = parseFloat(target_amount);
+    if (isNaN(numericTarget) || numericTarget <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Target cap amount must be a positive number.',
+      });
+    }
+
+    const insertQuery = `
+      INSERT INTO goal_wallets (name, target_amount, saved_amount, description, status)
+      VALUES ($1, $2, $3, $4, $5)
+      RETURNING id, name, target_amount, saved_amount, description, status, created_at;
+    `;
+
+    const result = await query(insertQuery, [
+      name.trim(),
+      numericTarget,
+      0.0,
+      (description || '').trim(),
+      'in_progress',
+    ]);
+
+    const createdWallet = {
+      ...result.rows[0],
+      target_amount: parseFloat(result.rows[0].target_amount) || numericTarget,
+      saved_amount: parseFloat(result.rows[0].saved_amount) || 0,
+    };
+
+    console.log(`[STS FINTECH] Goal wallet created: "${createdWallet.name}" (Target: ₹${createdWallet.target_amount})`);
+
+    return res.status(201).json({
+      success: true,
+      message: 'Target wallet activated successfully',
+      data: createdWallet,
+      company: COMPANY_NAME,
+    });
+  } catch (error) {
+    console.error('Error creating goal wallet:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to create goal wallet',
+      error: error.message,
+    });
+  }
+});
+
+/**
+ * POST /api/wallets/:id/add-cash
+ * Allocate cash towards a goal wallet
+ */
+app.post('/api/wallets/:id/add-cash', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { amount } = req.body;
+
+    const numericAmount = parseFloat(amount);
+    if (isNaN(numericAmount) || numericAmount <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Cash deposit amount must be greater than 0.',
+      });
+    }
+
+    // Check existing wallet and remaining ceiling limit
+    const checkQuery = `
+      SELECT id, name, target_amount, saved_amount, status
+      FROM goal_wallets
+      WHERE id = $1;
+    `;
+    const checkResult = await query(checkQuery, [id]);
+    if (!checkResult.rows || checkResult.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Wallet container not found',
+      });
+    }
+
+    const currentWallet = checkResult.rows[0];
+    const currentSaved = parseFloat(currentWallet.saved_amount) || 0;
+    const currentTarget = parseFloat(currentWallet.target_amount) || 0;
+    const remaining = Math.max(0, currentTarget - currentSaved);
+
+    if (numericAmount > remaining) {
+      return res.status(400).json({
+        success: false,
+        message: `Deposit cannot exceed the target ceiling. Maximum remaining deposit is ₹${remaining}.`,
+      });
+    }
+
+    const updateQuery = `
+      UPDATE goal_wallets
+      SET saved_amount = saved_amount + $1,
+          status = CASE WHEN (saved_amount + $1) >= target_amount THEN 'target_met' ELSE status END
+      WHERE id = $2
+      RETURNING id, name, target_amount, saved_amount, description, status, created_at;
+    `;
+
+    const result = await query(updateQuery, [numericAmount, id]);
+
+    if (!result.rows || result.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Wallet container not found',
+      });
+    }
+
+    const updated = {
+      ...result.rows[0],
+      target_amount: parseFloat(result.rows[0].target_amount),
+      saved_amount: parseFloat(result.rows[0].saved_amount),
+    };
+
+    return res.status(200).json({
+      success: true,
+      message: `Allocated ₹${numericAmount} to ${updated.name}`,
+      data: updated,
+    });
+  } catch (error) {
+    console.error('Error adding cash to goal wallet:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to allocate cash',
+      error: error.message,
+    });
+  }
+});
+
+/**
+ * DELETE /api/wallets/:id
+ * Remove a goal wallet
+ */
+app.delete('/api/wallets/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const deleteQuery = `DELETE FROM goal_wallets WHERE id = $1;`;
+    await query(deleteQuery, [id]);
+    return res.status(200).json({
+      success: true,
+      message: 'Wallet deleted successfully',
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
       error: error.message,
     });
   }

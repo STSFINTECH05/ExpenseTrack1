@@ -175,8 +175,10 @@ let inMemoryFinanceRecords = [
   },
 ];
 
+let inMemoryGoalWallets = [];
 let nextPaymentId = 4;
 let nextFinanceRecordId = 9;
+let nextGoalWalletId = 1;
 
 const query = async (text, params = []) => {
   if (pool) {
@@ -194,7 +196,10 @@ const query = async (text, params = []) => {
   // 1. Finance Records table queries
   if (normalized.includes('FINANCE_RECORDS')) {
     if (normalized.startsWith('SELECT')) {
-      let filtered = [...inMemoryFinanceRecords];
+      const uniqueRecords = Array.from(
+        new Map(inMemoryFinanceRecords.map((item) => [item.id || item.name, item])).values()
+      );
+      let filtered = uniqueRecords;
       if (normalized.includes('WHERE TYPE =') && params.length > 0) {
         const filterType = params[0];
         filtered = filtered.filter((r) => r.type === filterType);
@@ -203,6 +208,12 @@ const query = async (text, params = []) => {
       return { rows: filtered, rowCount: filtered.length };
     } else if (normalized.startsWith('INSERT')) {
       const [type, name, description, date, time, schedule, category, associated_wallet, amount] = params;
+      const existing = inMemoryFinanceRecords.find(
+        (r) => r.type === type && (r.name || '').toLowerCase().trim() === (name || '').toLowerCase().trim()
+      );
+      if (existing) {
+        return { rows: [existing], rowCount: 1 };
+      }
       const newRec = {
         id: nextFinanceRecordId++,
         type,
@@ -218,26 +229,98 @@ const query = async (text, params = []) => {
       };
       inMemoryFinanceRecords.unshift(newRec);
       return { rows: [newRec], rowCount: 1 };
+    } else if (normalized.startsWith('UPDATE')) {
+      const [name, description, date, time, schedule, category, associated_wallet, amount, id] = params;
+      const targetId = parseInt(id, 10);
+      const index = inMemoryFinanceRecords.findIndex((r) => r.id === targetId);
+      if (index === -1) {
+        return { rows: [], rowCount: 0 };
+      }
+      const existing = inMemoryFinanceRecords[index];
+      const updated = {
+        ...existing,
+        name: name !== undefined ? name : existing.name,
+        description: description !== undefined ? description : existing.description,
+        date: date !== undefined ? date : existing.date,
+        time: time !== undefined ? time : existing.time,
+        schedule: schedule !== undefined ? schedule : existing.schedule,
+        category: category !== undefined ? category : existing.category,
+        associated_wallet: associated_wallet !== undefined ? associated_wallet : existing.associated_wallet,
+        amount: amount !== undefined ? parseFloat(amount) : existing.amount,
+      };
+      inMemoryFinanceRecords[index] = updated;
+      return { rows: [updated], rowCount: 1 };
+    } else if (normalized.startsWith('DELETE')) {
+      const [id] = params;
+      const targetId = parseInt(id, 10);
+      const index = inMemoryFinanceRecords.findIndex((r) => r.id === targetId);
+      if (index === -1) {
+        return { rows: [], rowCount: 0 };
+      }
+      const removed = inMemoryFinanceRecords.splice(index, 1);
+      return { rows: removed, rowCount: 1 };
     }
   }
 
   // 2. Payments table queries
-  if (normalized.startsWith('SELECT')) {
-    const sorted = [...inMemoryPayments].sort(
-      (a, b) => new Date(b.created_at) - new Date(a.created_at)
-    );
-    return { rows: sorted, rowCount: sorted.length };
-  } else if (normalized.startsWith('INSERT')) {
-    const [title, amount, status] = params;
-    const newRecord = {
-      id: nextPaymentId++,
-      title,
-      amount: parseFloat(amount),
-      status: status || 'completed',
-      created_at: new Date().toISOString(),
-    };
-    inMemoryPayments.unshift(newRecord);
-    return { rows: [newRecord], rowCount: 1 };
+  if (normalized.includes('PAYMENTS')) {
+    if (normalized.startsWith('SELECT')) {
+      const sorted = [...inMemoryPayments].sort(
+        (a, b) => new Date(b.created_at) - new Date(a.created_at)
+      );
+      return { rows: sorted, rowCount: sorted.length };
+    } else if (normalized.startsWith('INSERT')) {
+      const [title, amount, status] = params;
+      const newRecord = {
+        id: nextPaymentId++,
+        title,
+        amount: parseFloat(amount),
+        status: status || 'completed',
+        created_at: new Date().toISOString(),
+      };
+      inMemoryPayments.unshift(newRecord);
+      return { rows: [newRecord], rowCount: 1 };
+    }
+  }
+
+  // 3. Goal Wallets table queries
+  if (normalized.includes('GOAL_WALLETS')) {
+    if (normalized.startsWith('SELECT')) {
+      let filtered = [...inMemoryGoalWallets];
+      if (normalized.includes('WHERE ID =') && params.length > 0) {
+        filtered = filtered.filter((w) => w.id === parseInt(params[0], 10));
+      }
+      filtered.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+      return { rows: filtered, rowCount: filtered.length };
+    } else if (normalized.startsWith('INSERT')) {
+      const [name, target_amount, saved_amount, description, status] = params;
+      const newWallet = {
+        id: nextGoalWalletId++,
+        name: name || 'Goal Wallet',
+        target_amount: parseFloat(target_amount) || 0.0,
+        saved_amount: parseFloat(saved_amount) || 0.0,
+        description: description || '',
+        status: status || 'in_progress',
+        created_at: new Date().toISOString(),
+      };
+      inMemoryGoalWallets.unshift(newWallet);
+      return { rows: [newWallet], rowCount: 1 };
+    } else if (normalized.startsWith('UPDATE')) {
+      const [addAmount, walletId] = params;
+      const wallet = inMemoryGoalWallets.find((w) => w.id === parseInt(walletId, 10));
+      if (wallet) {
+        wallet.saved_amount += parseFloat(addAmount) || 0.0;
+        if (wallet.saved_amount >= wallet.target_amount) {
+          wallet.status = 'target_met';
+        }
+        return { rows: [wallet], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    } else if (normalized.startsWith('DELETE')) {
+      const [walletId] = params;
+      inMemoryGoalWallets = inMemoryGoalWallets.filter((w) => w.id !== parseInt(walletId, 10));
+      return { rows: [], rowCount: 1 };
+    }
   }
 
   return { rows: [], rowCount: 0 };
