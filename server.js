@@ -63,67 +63,78 @@ app.use((req, res, next) => {
 
 // Auto-initialize PostgreSQL tables on startup
 const initDatabase = async () => {
-  if (pool) {
-    const createPaymentsTableQuery = `
-      CREATE TABLE IF NOT EXISTS payments (
-        id SERIAL PRIMARY KEY,
-        title VARCHAR(255) NOT NULL,
-        amount NUMERIC(12, 2) NOT NULL,
-        status VARCHAR(50) DEFAULT 'completed',
-        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-      );
-    `;
-
-    const createSegregationTableQuery = `
-      CREATE TABLE IF NOT EXISTS segregation (
-        id SERIAL PRIMARY KEY,
-        type VARCHAR(50) NOT NULL,
-        name VARCHAR(255) NOT NULL,
-        description TEXT,
-        date DATE,
-        time VARCHAR(50),
-        schedule VARCHAR(100),
-        category VARCHAR(100),
-        associated_wallet VARCHAR(100),
-        amount NUMERIC(12, 2) NOT NULL DEFAULT 0.00,
-        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-      );
-    `;
-
-    const createFinanceRecordsTableQuery = `
-      CREATE TABLE IF NOT EXISTS finance_records (
-        id SERIAL PRIMARY KEY,
-        type VARCHAR(50) NOT NULL,
-        name VARCHAR(255) NOT NULL,
-        description TEXT,
-        date DATE,
-        time VARCHAR(50),
-        schedule VARCHAR(100),
-        category VARCHAR(100),
-        associated_wallet VARCHAR(100),
-        amount NUMERIC(12, 2) NOT NULL DEFAULT 0.00,
-        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-      );
-    `;
-
-    const createGoalWalletsTableQuery = `
-      CREATE TABLE IF NOT EXISTS goal_wallets (
-        id SERIAL PRIMARY KEY,
-        name VARCHAR(255) NOT NULL,
-        target_amount NUMERIC(12, 2) NOT NULL DEFAULT 0.00,
-        saved_amount NUMERIC(12, 2) NOT NULL DEFAULT 0.00,
-        description TEXT,
-        status VARCHAR(50) DEFAULT 'in_progress',
-        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-      );
-    `;
-
+  if (pool && typeof pool.initDatabase === 'function') {
+    await pool.initDatabase(pool);
+  } else if (pool && isDatabaseConfigured) {
     try {
-      await pool.query(createPaymentsTableQuery);
-      await pool.query(createSegregationTableQuery);
-      await pool.query(createFinanceRecordsTableQuery);
-      await pool.query(createGoalWalletsTableQuery);
-      console.log('✅ [STS FINTECH] PostgreSQL "payments", "segregation", "finance_records" & "goal_wallets" tables verified.');
+      const bootstrapTablesQuery = `
+        CREATE TABLE IF NOT EXISTS wallets (
+          id SERIAL PRIMARY KEY,
+          name VARCHAR(255) NOT NULL,
+          type VARCHAR(100) DEFAULT 'general',
+          balance NUMERIC(12, 2) NOT NULL DEFAULT 0.00,
+          target_amount NUMERIC(12, 2) DEFAULT 0.00,
+          saved_amount NUMERIC(12, 2) DEFAULT 0.00,
+          description TEXT DEFAULT '',
+          status VARCHAR(50) DEFAULT 'active',
+          user_id VARCHAR(255),
+          created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS segregation (
+          id SERIAL PRIMARY KEY,
+          name VARCHAR(255) NOT NULL,
+          description TEXT DEFAULT '',
+          date DATE DEFAULT CURRENT_DATE,
+          time VARCHAR(50),
+          category VARCHAR(100) DEFAULT 'General',
+          wallet_id VARCHAR(100),
+          associated_wallet VARCHAR(100) DEFAULT 'Primary Wallet',
+          amount NUMERIC(12, 2) NOT NULL DEFAULT 0.00,
+          schedule VARCHAR(100) DEFAULT 'One-time',
+          type VARCHAR(50) NOT NULL DEFAULT 'additional_expense',
+          user_id VARCHAR(255),
+          created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS payments (
+          id SERIAL PRIMARY KEY,
+          name VARCHAR(255),
+          title VARCHAR(255),
+          amount NUMERIC(12, 2) NOT NULL DEFAULT 0.00,
+          date DATE DEFAULT CURRENT_DATE,
+          status VARCHAR(50) DEFAULT 'completed',
+          user_id VARCHAR(255),
+          created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS goal_wallets (
+          id SERIAL PRIMARY KEY,
+          name VARCHAR(255) NOT NULL,
+          target_amount NUMERIC(12, 2) NOT NULL DEFAULT 0.00,
+          saved_amount NUMERIC(12, 2) NOT NULL DEFAULT 0.00,
+          description TEXT DEFAULT '',
+          status VARCHAR(50) DEFAULT 'in_progress',
+          type VARCHAR(100) DEFAULT 'goal',
+          balance NUMERIC(12, 2) DEFAULT 0.00,
+          user_id VARCHAR(255),
+          created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS finance_records (
+          id SERIAL PRIMARY KEY,
+          type VARCHAR(50) NOT NULL DEFAULT 'additional_expense',
+          name VARCHAR(255) NOT NULL,
+          description TEXT DEFAULT '',
+          date DATE DEFAULT CURRENT_DATE,
+          time VARCHAR(50),
+          schedule VARCHAR(100) DEFAULT 'One-time',
+          category VARCHAR(100) DEFAULT 'General',
+          associated_wallet VARCHAR(100) DEFAULT 'Primary Wallet',
+          wallet_id VARCHAR(100),
+          amount NUMERIC(12, 2) NOT NULL DEFAULT 0.00,
+          user_id VARCHAR(255),
+          created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        );
+      `;
+      await pool.query(bootstrapTablesQuery);
+      console.log('✅ [STS FINTECH] PostgreSQL "wallets", "segregation", "payments", "finance_records" & "goal_wallets" tables verified.');
     } catch (error) {
       console.error('❌ [STS FINTECH] Error initializing tables:', error.message);
     }
@@ -182,15 +193,19 @@ app.get('/api/health', (req, res) => {
 app.get('/api/payments', async (req, res) => {
   try {
     const selectQuery = `
-      SELECT id, title, amount, status, created_at 
+      SELECT id, COALESCE(title, name, '') AS title, COALESCE(name, title, '') AS name, amount, status, date, user_id, created_at 
       FROM payments 
       ORDER BY created_at DESC;
     `;
     const result = await query(selectQuery);
 
+    if (!result || !result.rows || result.rows.length === 0) {
+      return res.status(200).json([]);
+    }
+
     const formattedRows = result.rows.map((row) => ({
       ...row,
-      amount: parseFloat(row.amount),
+      amount: parseFloat(row.amount) || 0,
     }));
 
     return res.status(200).json({
@@ -199,13 +214,9 @@ app.get('/api/payments', async (req, res) => {
       data: formattedRows,
       company: COMPANY_NAME,
     });
-  } catch (error) {
-    console.error('Error fetching payments:', error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to retrieve payments',
-      error: error.message,
-    });
+  } catch (err) {
+    console.error(err.message);
+    return res.status(200).json([]);
   }
 });
 
@@ -285,50 +296,54 @@ app.get('/api/segregation', async (req, res) => {
 
     try {
       const selectQuery = type
-        ? `SELECT id, type, name, description, date, time, schedule, category, associated_wallet, amount, created_at
+        ? `SELECT id, type, name, description, date, time, schedule, category, associated_wallet, wallet_id, amount, user_id, created_at
            FROM segregation
            WHERE type = $1
            ORDER BY date DESC, created_at DESC;`
-        : `SELECT id, type, name, description, date, time, schedule, category, associated_wallet, amount, created_at
+        : `SELECT id, type, name, description, date, time, schedule, category, associated_wallet, wallet_id, amount, user_id, created_at
            FROM segregation
            ORDER BY date DESC, created_at DESC;`;
       result = await query(selectQuery, type ? [type] : []);
     } catch (err) {
+      console.error(err.message);
       // Fallback to finance_records if segregation table query failed
       try {
         const selectQuery = type
-          ? `SELECT id, type, name, description, date, time, schedule, category, associated_wallet, amount, created_at
+          ? `SELECT id, type, name, description, date, time, schedule, category, associated_wallet, wallet_id, amount, user_id, created_at
              FROM finance_records
              WHERE type = $1
              ORDER BY date DESC, created_at DESC;`
-          : `SELECT id, type, name, description, date, time, schedule, category, associated_wallet, amount, created_at
+          : `SELECT id, type, name, description, date, time, schedule, category, associated_wallet, wallet_id, amount, user_id, created_at
              FROM finance_records
              ORDER BY date DESC, created_at DESC;`;
         result = await query(selectQuery, type ? [type] : []);
       } catch (err2) {
+        console.error(err2.message);
         return res.status(200).json([]);
       }
     }
 
-    if (!result.rows || result.rows.length === 0) {
+    if (!result || !result.rows || result.rows.length === 0) {
       // If segregation table was empty, check if finance_records has rows
       try {
         const fallbackQuery = type
-          ? `SELECT id, type, name, description, date, time, schedule, category, associated_wallet, amount, created_at
+          ? `SELECT id, type, name, description, date, time, schedule, category, associated_wallet, wallet_id, amount, user_id, created_at
              FROM finance_records
              WHERE type = $1
              ORDER BY date DESC, created_at DESC;`
-          : `SELECT id, type, name, description, date, time, schedule, category, associated_wallet, amount, created_at
+          : `SELECT id, type, name, description, date, time, schedule, category, associated_wallet, wallet_id, amount, user_id, created_at
              FROM finance_records
              ORDER BY date DESC, created_at DESC;`;
         const fbResult = await query(fallbackQuery, type ? [type] : []);
         if (fbResult && fbResult.rows && fbResult.rows.length > 0) {
           result = fbResult;
         }
-      } catch (e) {}
+      } catch (e) {
+        console.error(e.message);
+      }
     }
 
-    if (!result.rows || result.rows.length === 0) {
+    if (!result || !result.rows || result.rows.length === 0) {
       return res.status(200).json([]);
     }
 
@@ -347,8 +362,8 @@ app.get('/api/segregation', async (req, res) => {
       data: uniqueRows,
       company: COMPANY_NAME,
     });
-  } catch (error) {
-    console.error('Error fetching segregation records:', error);
+  } catch (err) {
+    console.error(err.message);
     return res.status(200).json([]);
   }
 });
@@ -602,16 +617,54 @@ app.delete('/api/segregation/:id', async (req, res) => {
  */
 app.get('/api/wallets', async (req, res) => {
   try {
-    const selectQuery = `
-      SELECT id, name, target_amount, saved_amount, description, status, created_at
-      FROM goal_wallets
-      ORDER BY created_at DESC;
-    `;
-    const result = await query(selectQuery);
+    let result = { rows: [] };
+
+    try {
+      const selectQuery = `
+        SELECT id, name, target_amount, saved_amount, description, status, type, balance, user_id, created_at
+        FROM goal_wallets
+        ORDER BY created_at DESC;
+      `;
+      result = await query(selectQuery);
+    } catch (err) {
+      console.error(err.message);
+      try {
+        const fallbackQuery = `
+          SELECT id, name, COALESCE(target_amount, balance, 0) AS target_amount, COALESCE(saved_amount, balance, 0) AS saved_amount, description, status, type, balance, user_id, created_at
+          FROM wallets
+          ORDER BY created_at DESC;
+        `;
+        result = await query(fallbackQuery);
+      } catch (err2) {
+        console.error(err2.message);
+        return res.status(200).json([]);
+      }
+    }
+
+    if (!result || !result.rows || result.rows.length === 0) {
+      // Check wallets table if goal_wallets was empty
+      try {
+        const fallbackQuery = `
+          SELECT id, name, COALESCE(target_amount, balance, 0) AS target_amount, COALESCE(saved_amount, balance, 0) AS saved_amount, description, status, type, balance, user_id, created_at
+          FROM wallets
+          ORDER BY created_at DESC;
+        `;
+        const fbResult = await query(fallbackQuery);
+        if (fbResult && fbResult.rows && fbResult.rows.length > 0) {
+          result = fbResult;
+        }
+      } catch (e) {
+        console.error(e.message);
+      }
+    }
+
+    if (!result || !result.rows || result.rows.length === 0) {
+      return res.status(200).json([]);
+    }
 
     const formattedRows = result.rows.map((row) => ({
       ...row,
-      target_amount: parseFloat(row.target_amount) || 0,
+      target_amount: parseFloat(row.target_amount) || parseFloat(row.balance) || 0,
       saved_amount: parseFloat(row.saved_amount) || 0,
     }));
 
@@ -621,13 +674,9 @@ app.get('/api/wallets', async (req, res) => {
       data: formattedRows,
       company: COMPANY_NAME,
     });
-  } catch (error) {
-    console.error('Error fetching goal wallets:', error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to retrieve goal wallets',
-      error: error.message,
-    });
+  } catch (err) {
+    console.error(err.message);
+    return res.status(200).json([]);
   }
 });
 
