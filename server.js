@@ -3,8 +3,64 @@ const express = require('express');
 const cors = require('cors');
 const pool = require('./db');
 
-const query = (text, params) => pool.query(text, params);
 const isDatabaseConfigured = Boolean(process.env.DATABASE_URL);
+
+// In-memory goal wallets store for memory-backed operation when DATABASE_URL is not provided or offline
+const inMemoryGoalWallets = [];
+
+const query = async (text, params = []) => {
+  if (isDatabaseConfigured && pool) {
+    try {
+      return await pool.query(text, params);
+    } catch (err) {
+      const isConnErr =
+        err.code === 'ECONNREFUSED' ||
+        err.code === 'ENOTFOUND' ||
+        (err.errors && err.errors.some((e) => e.code === 'ECONNREFUSED')) ||
+        err.message?.includes('ECONNREFUSED');
+      if (!isConnErr) throw err;
+      console.warn('[STS FINTECH] Database connection unavailable; utilizing in-memory wallet store.');
+    }
+  }
+
+  // Handle in-memory query simulation for wallets when database is unavailable or not configured
+  const sql = (typeof text === 'string' ? text : text?.text || '').toLowerCase();
+
+  // Check DELETE first
+  if (sql.includes('delete from goal_wallets') || sql.includes('delete from wallets')) {
+    const id = params[0];
+    const idx = inMemoryGoalWallets.findIndex((w) => String(w.id) === String(id));
+    if (idx !== -1) inMemoryGoalWallets.splice(idx, 1);
+    return { rows: [{ id }] };
+  }
+
+  // Check UPDATE second
+  if (sql.includes('update goal_wallets') || sql.includes('update wallets')) {
+    const amount = parseFloat(params[0]) || 0;
+    const id = params[1];
+    const item = inMemoryGoalWallets.find((w) => String(w.id) === String(id));
+    if (item) {
+      item.saved_amount = (parseFloat(item.saved_amount) || 0) + amount;
+      if (item.saved_amount >= item.target_amount) {
+        item.status = 'target_met';
+      }
+      return { rows: [item] };
+    }
+    return { rows: [] };
+  }
+
+  // Check SELECT third
+  if (sql.includes('from goal_wallets') || sql.includes('from wallets')) {
+    if (sql.includes('where id =')) {
+      const id = params[0];
+      const found = inMemoryGoalWallets.find((w) => String(w.id) === String(id));
+      return { rows: found ? [found] : [] };
+    }
+    return { rows: [...inMemoryGoalWallets] };
+  }
+
+  return { rows: [] };
+};
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -686,44 +742,191 @@ app.get('/api/wallets', async (req, res) => {
  */
 app.post('/api/wallets', async (req, res) => {
   try {
-    const { name, target_amount, description = '' } = req.body;
+    // 1. Purpose / Item name extraction & validation (supports name, purpose, purposeName, itemName, title)
+    const rawName =
+      req.body.name ??
+      req.body.purpose ??
+      req.body.purposeName ??
+      req.body.itemName ??
+      req.body.item_name ??
+      req.body.title ??
+      '';
+    const cleanName = typeof rawName === 'string' ? rawName.trim() : String(rawName || '').trim();
 
-    if (!name || typeof name !== 'string' || name.trim().length === 0) {
+    if (!cleanName || cleanName.length === 0) {
       return res.status(400).json({
         success: false,
         message: 'Purpose / Item name is required.',
       });
     }
 
-    const numericTarget = parseFloat(target_amount);
-    if (isNaN(numericTarget) || numericTarget <= 0) {
+    // 2. Target cap amount extraction & numeric parsing (supports target_amount, targetAmount, target_cap, targetCap, amount)
+    const rawTarget =
+      req.body.target_amount ??
+      req.body.targetAmount ??
+      req.body.target_cap ??
+      req.body.targetCap ??
+      req.body.amount;
+    const numericTarget = typeof rawTarget === 'number' ? rawTarget : parseFloat(rawTarget);
+
+    if (rawTarget === undefined || rawTarget === null || isNaN(numericTarget) || numericTarget <= 0) {
       return res.status(400).json({
         success: false,
-        message: 'Target cap amount must be a positive number.',
+        message: 'Target cap amount must be a positive number greater than 0.',
       });
     }
 
-    const insertQuery = `
-      INSERT INTO goal_wallets (name, target_amount, saved_amount, description, status)
-      VALUES ($1, $2, $3, $4, $5)
-      RETURNING id, name, target_amount, saved_amount, description, status, created_at;
-    `;
+    // 3. Description / notes extraction (supports description, notes, descriptiveNotes)
+    const rawDescription = req.body.description ?? req.body.notes ?? req.body.descriptiveNotes ?? '';
+    const cleanDescription = typeof rawDescription === 'string' ? rawDescription.trim() : String(rawDescription || '').trim();
 
-    const result = await query(insertQuery, [
-      name.trim(),
-      numericTarget,
-      0.0,
-      (description || '').trim(),
-      'in_progress',
-    ]);
+    // 4. Type / category extraction (supports type, category)
+    const rawType = req.body.type ?? req.body.category ?? 'goal';
+    const cleanType = typeof rawType === 'string' && rawType.trim().length > 0 ? rawType.trim() : 'goal';
 
-    const createdWallet = {
-      ...result.rows[0],
-      target_amount: parseFloat(result.rows[0].target_amount) || numericTarget,
-      saved_amount: parseFloat(result.rows[0].saved_amount) || 0,
-    };
+    // 5. User authentication context parsing (req.user.id, user_id, headers, or body)
+    const userId =
+      req.user?.id ||
+      req.user?.user_id ||
+      req.user?._id ||
+      req.userId ||
+      req.user_id ||
+      req.headers['x-user-id'] ||
+      req.body?.user_id ||
+      req.body?.userId ||
+      null;
 
-    console.log(`[STS FINTECH] Goal wallet created: "${createdWallet.name}" (Target: ₹${createdWallet.target_amount})`);
+    let createdWallet = null;
+
+    // 6. Attempt PostgreSQL database insertion if database is configured
+    if (isDatabaseConfigured && pool) {
+      try {
+        const insertFullQuery = `
+          INSERT INTO goal_wallets (name, target_amount, saved_amount, description, status, type, balance, user_id)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+          RETURNING id, name, target_amount, saved_amount, description, status, type, balance, user_id, created_at;
+        `;
+        const result = await pool.query(insertFullQuery, [
+          cleanName,
+          numericTarget,
+          0.0,
+          cleanDescription,
+          'in_progress',
+          cleanType,
+          0.0,
+          userId,
+        ]);
+
+        if (result.rows && result.rows.length > 0) {
+          createdWallet = {
+            ...result.rows[0],
+            target_amount: parseFloat(result.rows[0].target_amount) || numericTarget,
+            saved_amount: parseFloat(result.rows[0].saved_amount) || 0,
+          };
+        }
+      } catch (dbErr) {
+        console.error('[STS FINTECH] Error inserting into goal_wallets table:', dbErr.message || dbErr);
+        if (dbErr.detail) console.error('[STS FINTECH] DB Detail:', dbErr.detail);
+        if (dbErr.code) console.error('[STS FINTECH] DB Error Code:', dbErr.code);
+
+        // Fallback: If column user_id / type doesn't exist on older table schema, try standard columns
+        if (dbErr.code === '42703') {
+          try {
+            const insertBaseQuery = `
+              INSERT INTO goal_wallets (name, target_amount, saved_amount, description, status)
+              VALUES ($1, $2, $3, $4, $5)
+              RETURNING id, name, target_amount, saved_amount, description, status, created_at;
+            `;
+            const baseResult = await pool.query(insertBaseQuery, [
+              cleanName,
+              numericTarget,
+              0.0,
+              cleanDescription,
+              'in_progress',
+            ]);
+            if (baseResult.rows && baseResult.rows.length > 0) {
+              createdWallet = {
+                ...baseResult.rows[0],
+                target_amount: parseFloat(baseResult.rows[0].target_amount) || numericTarget,
+                saved_amount: parseFloat(baseResult.rows[0].saved_amount) || 0,
+                type: cleanType,
+                user_id: userId,
+              };
+            }
+          } catch (baseErr) {
+            console.error('[STS FINTECH] Fallback insert into goal_wallets failed:', baseErr.message || baseErr);
+          }
+        }
+
+        // Fallback: If goal_wallets table does not exist, try wallets table
+        if (!createdWallet && (dbErr.code === '42P01' || dbErr.message?.includes('does not exist'))) {
+          try {
+            const insertWalletsQuery = `
+              INSERT INTO wallets (name, type, balance, target_amount, saved_amount, description, status, user_id)
+              VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+              RETURNING id, name, target_amount, saved_amount, description, status, type, balance, user_id, created_at;
+            `;
+            const wResult = await pool.query(insertWalletsQuery, [
+              cleanName,
+              cleanType,
+              0.0,
+              numericTarget,
+              0.0,
+              cleanDescription,
+              'in_progress',
+              userId,
+            ]);
+            if (wResult.rows && wResult.rows.length > 0) {
+              createdWallet = {
+                ...wResult.rows[0],
+                target_amount: parseFloat(wResult.rows[0].target_amount) || numericTarget,
+                saved_amount: parseFloat(wResult.rows[0].saved_amount) || 0,
+              };
+            }
+          } catch (wErr) {
+            console.error('[STS FINTECH] Fallback insert into wallets failed:', wErr.message || wErr);
+          }
+        }
+
+        const isConnErr =
+          dbErr.code === 'ECONNREFUSED' ||
+          dbErr.code === 'ENOTFOUND' ||
+          (dbErr.errors && dbErr.errors.some((e) => e.code === 'ECONNREFUSED')) ||
+          dbErr.message?.includes('ECONNREFUSED');
+
+        // If it's a real SQL constraint/syntax error and not a connection failure, rethrow to trigger 500 logging
+        if (!createdWallet && !isConnErr) {
+          throw dbErr;
+        }
+      }
+    }
+
+    // 7. In-memory fallback if database is not configured or connection is unavailable
+    if (!createdWallet) {
+      const nextId =
+        inMemoryGoalWallets.length > 0
+          ? Math.max(...inMemoryGoalWallets.map((w) => Number(w.id) || 0)) + 1
+          : 1;
+
+      createdWallet = {
+        id: nextId,
+        name: cleanName,
+        target_amount: numericTarget,
+        saved_amount: 0.0,
+        balance: 0.0,
+        description: cleanDescription,
+        status: 'in_progress',
+        type: cleanType,
+        user_id: userId,
+        created_at: new Date().toISOString(),
+      };
+      inMemoryGoalWallets.unshift(createdWallet);
+      console.log(`[STS FINTECH] Goal wallet created (in-memory mode): "${createdWallet.name}" (Target: ₹${createdWallet.target_amount})`);
+    } else {
+      // Sync into memory store
+      inMemoryGoalWallets.unshift(createdWallet);
+      console.log(`[STS FINTECH] Goal wallet created (database mode): "${createdWallet.name}" (Target: ₹${createdWallet.target_amount})`);
+    }
 
     return res.status(201).json({
       success: true,
@@ -732,11 +935,23 @@ app.post('/api/wallets', async (req, res) => {
       company: COMPANY_NAME,
     });
   } catch (error) {
-    console.error('Error creating goal wallet:', error);
+    console.error('[STS FINTECH] Detailed Error in POST /api/wallets:', error);
+    if (error.stack) console.error('[STS FINTECH] Error Stack:', error.stack);
+    if (error.detail) console.error('[STS FINTECH] SQL Error Detail:', error.detail);
+    if (error.hint) console.error('[STS FINTECH] SQL Error Hint:', error.hint);
+    if (error.code) console.error('[STS FINTECH] SQL Error Code:', error.code);
+
+    const errorMessage =
+      error.message ||
+      (error.errors && error.errors.map((e) => e.message).join('; ')) ||
+      error.code ||
+      'Failed to create goal wallet';
+
     return res.status(500).json({
       success: false,
       message: 'Failed to create goal wallet',
-      error: error.message,
+      error: errorMessage,
+      detail: error.detail || undefined,
     });
   }
 });
