@@ -17,7 +17,7 @@ const requiresSsl =
   databaseUrl.includes('sslmode=require');
 
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
+  connectionString: databaseUrl,
   ssl: requiresSsl ? { rejectUnauthorized: false } : false,
 });
 
