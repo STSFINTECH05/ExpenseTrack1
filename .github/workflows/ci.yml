@@ -12,7 +12,7 @@ jobs:
     name: Test & Validate Backend
     runs-on: ubuntu-latest
 
-    # Optional PostgreSQL service for testing database integration
+    # Spin up local PostgreSQL container in GitHub Actions
     services:
       postgres:
         image: postgres:16-alpine
@@ -49,7 +49,7 @@ jobs:
           PORT: 5000
           DATABASE_URL: postgres://postgres:testpassword@localhost:5432/expensetrack_test
           CLIENT_URL: http://localhost:5173
-          SESSION_SECRET: stsfintech_ci_test_session_secret_min_32_characters_long
+          SESSION_SECRET: a3ae91d29f196912abbbef723365ccdaed449c9c3fa04abcb591b5d36dbeb2b0
         run: |
           # Start server in background
           node server.js &
