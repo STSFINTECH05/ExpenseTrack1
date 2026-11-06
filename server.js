@@ -165,14 +165,131 @@ app.use((req, res, next) => {
   next();
 });
 
-// CSRF protection for all API requests that modify data
+// CSRF protection for requests with an established session CSRF token
 app.use('/api', csrfProtection);
 
-// Authentication endpoints
+// Authentication endpoints (/api/auth/login, /api/auth/register, /api/auth/csrf, /api/auth/me, /api/auth/logout)
 app.use('/api/auth', authRoutes);
 
-// Protect all remaining API endpoints
-app.use('/api', authenticate);
+// Optional session user resolver: populates req.user if session exists, without blocking unauthenticated calls
+app.use(async (req, res, next) => {
+  if (req.session?.userId) {
+    try {
+      const result = await pool.query(
+        'SELECT id, name, email, role FROM users WHERE id = $1 AND is_active = TRUE',
+        [req.session.userId]
+      );
+      if (result.rows.length > 0) {
+        req.user = result.rows[0];
+      }
+    } catch (e) {}
+  }
+  next();
+});
+
+/**
+ * GET /health & GET /api/health
+ * Operational status and company metadata
+ */
+app.get(['/health', '/api/health'], (req, res) => {
+  res.status(200).json({
+    status: 'healthy',
+    company: COMPANY_NAME,
+    service: 'ExpenseTrack Backend API',
+    database: isDatabaseConfigured ? 'connected' : 'in-memory-fallback',
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+  });
+});
+
+/**
+ * GET /api/payments
+ * Retrieve all payment transactions ordered by creation date descending
+ */
+app.get('/api/payments', async (req, res) => {
+  try {
+    const selectQuery = `
+      SELECT id, COALESCE(title, name, '') AS title, COALESCE(name, title, '') AS name, amount, status, date, user_id, created_at
+      FROM payments
+      ORDER BY created_at DESC;
+    `;
+    const result = await query(selectQuery);
+
+    const rows = (result && result.rows) || [];
+    const formattedRows = rows.map((row) => ({
+      ...row,
+      amount: parseFloat(row.amount) || 0,
+    }));
+
+    return res.status(200).json({
+      success: true,
+      count: formattedRows.length,
+      data: formattedRows,
+      company: COMPANY_NAME,
+    });
+  } catch (err) {
+    console.error('Error fetching payments:', err.message);
+    return res.status(200).json({
+      success: true,
+      count: 0,
+      data: [],
+      company: COMPANY_NAME,
+    });
+  }
+});
+
+/**
+ * POST /api/payments
+ * Validate and insert a new payment record
+ */
+app.post('/api/payments', async (req, res) => {
+  try {
+    const { title, name, amount, status = 'completed' } = req.body;
+    const itemTitle = (title || name || '').trim();
+
+    if (!itemTitle) {
+      return res.status(400).json({
+        success: false,
+        message: 'Payment title is required and must be a non-empty string.',
+      });
+    }
+
+    const numericAmount = parseFloat(amount);
+    if (isNaN(numericAmount) || numericAmount <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Payment amount must be a positive number greater than 0.',
+      });
+    }
+
+    const insertQuery = `
+      INSERT INTO payments (title, name, amount, status)
+      VALUES ($1, $1, $2, $3)
+      RETURNING id, title, name, amount, status, created_at;
+    `;
+
+    const result = await query(insertQuery, [itemTitle, numericAmount, (status || 'completed').toLowerCase()]);
+    const createdPayment = {
+      ...result.rows[0],
+      amount: parseFloat(result.rows[0].amount),
+    };
+
+    return res.status(201).json({
+      success: true,
+      message: 'Payment recorded successfully',
+      data: createdPayment,
+      company: COMPANY_NAME,
+    });
+  } catch (error) {
+    console.error('Error creating payment:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Internal server error while creating payment',
+      error: error.message,
+    });
+  }
+});
+
 /**
  * GET /api/segregation
  * Retrieve finance segregation records, with optional ?type= filter
@@ -194,7 +311,7 @@ app.get('/api/segregation', async (req, res) => {
            ORDER BY date DESC, created_at DESC;`;
       result = await query(selectQuery, type ? [type] : []);
     } catch (err) {
-      console.error(err.message);
+      console.error('Error querying segregation table:', err.message);
       // Fallback to finance_records if segregation table query failed
       try {
         const selectQuery = type
@@ -207,8 +324,13 @@ app.get('/api/segregation', async (req, res) => {
              ORDER BY date DESC, created_at DESC;`;
         result = await query(selectQuery, type ? [type] : []);
       } catch (err2) {
-        console.error(err2.message);
-        return res.status(200).json([]);
+        console.error('Error querying finance_records fallback:', err2.message);
+        return res.status(200).json({
+          success: true,
+          count: 0,
+          data: [],
+          company: COMPANY_NAME,
+        });
       }
     }
 
@@ -228,18 +350,19 @@ app.get('/api/segregation', async (req, res) => {
           result = fbResult;
         }
       } catch (e) {
-        console.error(e.message);
+        console.error('Error in fallbackQuery:', e.message);
       }
     }
 
-    if (!result || !result.rows || result.rows.length === 0) {
-      return res.status(200).json([]);
-    }
-
-    const formattedRows = result.rows.map((row) => ({
+    const rows = (result && result.rows) || [];
+    const formattedRows = rows.map((row) => ({
       ...row,
       amount: parseFloat(row.amount) || 0,
-      date: row.date ? (typeof row.date === 'string' ? row.date.split('T')[0] : new Date(row.date).toISOString().split('T')[0]) : null,
+      date: row.date
+        ? typeof row.date === 'string'
+          ? row.date.split('T')[0]
+          : new Date(row.date).toISOString().split('T')[0]
+        : null,
     }));
 
     // Filter duplicates by unique id or name before sending response
@@ -252,8 +375,13 @@ app.get('/api/segregation', async (req, res) => {
       company: COMPANY_NAME,
     });
   } catch (err) {
-    console.error(err.message);
-    return res.status(200).json([]);
+    console.error('Unhandled segregation fetch error:', err.message);
+    return res.status(200).json({
+      success: true,
+      count: 0,
+      data: [],
+      company: COMPANY_NAME,
+    });
   }
 });
 

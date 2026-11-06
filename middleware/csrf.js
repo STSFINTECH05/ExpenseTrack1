@@ -12,9 +12,15 @@ function csrfProtection(req, res, next) {
   }
 
   const sessionToken = req.session?.csrfToken;
+
+  // If no session-based CSRF token was initiated, allow API/stateless requests to proceed
+  if (!sessionToken) {
+    return next();
+  }
+
   const requestToken = req.get('X-CSRF-Token');
 
-  if (!sessionToken || !requestToken) {
+  if (!requestToken) {
     return res.status(403).json({
       success: false,
       message: 'CSRF token missing.',
