@@ -1,7 +1,14 @@
 require('dotenv').config();
+
 const express = require('express');
 const cors = require('cors');
+const helmet = require('helmet');
 const pool = require('./db');
+
+const { sessionMiddleware } = require('./config/session');
+const { csrfProtection } = require('./middleware/csrf');
+const authenticate = require('./middleware/authenticate');
+const authRoutes = require('./routes/auth.routes');
 
 const isDatabaseConfigured = Boolean(process.env.DATABASE_URL);
 
@@ -64,45 +71,53 @@ const query = async (text, params = []) => {
 
 const app = express();
 const PORT = process.env.PORT || 5000;
-const CLIENT_URL = process.env.CLIENT_URL || 'http://localhost:5173';
 
 const COMPANY_NAME = 'STS FINTECH PRIVATE LIMITED';
 
-// Configure CORS to support frontend client communication across production and preview environments
-const allowedOrigins = [
-  CLIENT_URL,
-  'https://expense-track-seven-smoky.vercel.app',
-  'http://localhost:5173',
-  'http://localhost:3000',
-  'http://localhost:5174',
-  'http://127.0.0.1:5173',
-];
+const isProduction = process.env.NODE_ENV === 'production';
+
+if (isProduction) {
+  app.set('trust proxy', 1);
+}
+
+// Exact frontend origin allowlist.
+// Configure CLIENT_URLS as comma-separated URLs.
+const allowedOrigins = (
+  process.env.CLIENT_URLS ||
+  process.env.CLIENT_URL ||
+  'http://localhost:5173'
+)
+  .split(',')
+  .map(origin => origin.trim())
+  .filter(Boolean);
 
 const corsOptions = {
   origin: (origin, callback) => {
-    // Allow requests with no origin (like mobile apps, curl, Postman)
-    if (!origin) return callback(null, true);
-
-    if (
-      allowedOrigins.includes(origin) ||
-      /\.vercel\.app$/.test(origin) ||
-      (process.env.CLIENT_URL && origin === process.env.CLIENT_URL)
-    ) {
+    if (!origin || allowedOrigins.includes(origin)) {
       return callback(null, true);
     }
 
-    // Permit all preview / cross-origin requests gracefully without rejecting
-    return callback(null, true);
+    return callback(new Error('Origin not allowed by CORS'));
   },
   credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Company-Name', 'X-Service'],
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: [
+    'Content-Type',
+    'X-CSRF-Token',
+    'X-Company-Name',
+    'X-Service'
+  ],
 };
 
-app.use(cors(corsOptions));
-app.options('*', cors());
+app.use(helmet());
 
-app.use(express.json());
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
+
+app.use(express.json({ limit: '1mb' }));
+
+// Server-side PostgreSQL sessions
+app.use(sessionMiddleware);
 
 // Company Branding Header Middleware
 app.use((req, res, next) => {
@@ -117,6 +132,21 @@ app.use((req, res, next) => {
   next();
 });
 
+// Company branding headers
+app.use((req, res, next) => {
+  res.setHeader('X-Company-Name', COMPANY_NAME);
+  res.setHeader('X-Service', 'ExpenseTrack-API');
+  next();
+});
+
+// CSRF protection for all API requests that modify data
+app.use('/api', csrfProtection);
+
+// Authentication endpoints
+app.use('/api/auth', authRoutes);
+
+// Protect all remaining API endpoints
+app.use('/api', authenticate);
 /**
  * GET /api/segregation
  * Retrieve finance segregation records, with optional ?type= filter
@@ -868,16 +898,47 @@ app.use((err, req, res, next) => {
   });
 });
 
+
 // Server Initialization
-app.listen(PORT, async () => {
-  console.log(` Server running on port ${PORT}`);
-  console.log('========================================================');
-  console.log(`🚀 ${COMPANY_NAME}`);
-  console.log(`   ExpenseTrack Backend Server Running`);
-  console.log(`   Port: ${PORT}`);
-  console.log(`   URL: http://localhost:${PORT}`);
-  console.log(`   Health Check: http://localhost:${PORT}/api/health`);
-  console.log('========================================================');
-});
+async function startServer() {
+  try {
+    if (!process.env.DATABASE_URL) {
+      throw new Error('DATABASE_URL is required. Server startup cancelled.');
+    }
+
+    console.log('[STS FINTECH] Connecting to PostgreSQL...');
+
+    await pool.query('SELECT 1');
+
+    console.log('[STS FINTECH] PostgreSQL connection successful.');
+
+    console.log('[STS FINTECH] Initializing database tables...');
+
+    await pool.initDatabase();
+
+    console.log('[STS FINTECH] Database initialization successful.');
+
+    const server = app.listen(PORT, () => {
+      console.log('========================================================');
+      console.log(`🚀 ${COMPANY_NAME}`);
+      console.log('   ExpenseTrack Backend Server Running');
+      console.log(`   Port: ${PORT}`);
+      console.log(`   URL: http://localhost:${PORT}`);
+      console.log('========================================================');
+    });
+
+    return server;
+  } catch (error) {
+    console.error('[STS FINTECH] Server startup failed:', error.message);
+    await pool.end().catch(() => {});
+    process.exitCode = 1;
+    throw error;
+  }
+}
+
+if (require.main === module) {
+  startServer().catch(() => {});
+}
 
 module.exports = app;
+module.exports.startServer = startServer;

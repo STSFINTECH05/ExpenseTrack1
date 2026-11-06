@@ -8,10 +8,16 @@
     "dev": "nodemon server.js"
   },
   "dependencies": {
+    "argon2": "^0.45.2",
+    "connect-pg-simple": "^10.0.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
-    "pg": "^8.13.1"
+    "express-rate-limit": "^8.7.3",
+    "express-session": "^1.19.0",
+    "helmet": "^8.3.0",
+    "pg": "^8.13.1",
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "nodemon": "^3.1.9"
@@ -24,5 +30,8 @@
     "sts-fintech"
   ],
   "author": "STS FINTECH PRIVATE LIMITED",
-  "license": "ISC"
+  "license": "ISC",
+  "allowScripts": {
+    "argon2@0.45.2": true
+  }
 }

@@ -151,23 +151,15 @@ const initDatabase = async (client = pool) => {
     await client.query(bootstrapSql);
     console.log('✅ [STS FINTECH] PostgreSQL tables verified and initialized: "wallets", "segregation", "payments", "goal_wallets", "finance_records".');
   } catch (err) {
-    console.error('❌ [STS FINTECH] Error initializing tables:', err.message);
+    console.error(
+      '❌ [STS FINTECH] Database initialization failed:',
+      err.message
+    );
+    throw err;
   }
 };
 
-// Immediate test query to verify database connectivity on startup and run migration
-if (process.env.DATABASE_URL) {
-  pool.query('SELECT NOW()')
-    .then(async () => {
-      console.log(' Connected to PostgreSQL database successfully');
-      await initDatabase(pool);
-    })
-    .catch((err) => {
-      console.error(' PostgreSQL connection error: ', err.message || err);
-    });
-}
-
 pool.initDatabase = initDatabase;
-pool.pool = pool;
 
 module.exports = pool;
+
