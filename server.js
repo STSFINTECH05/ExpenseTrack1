@@ -80,24 +80,49 @@ if (isProduction) {
   app.set('trust proxy', 1);
 }
 
-// Exact frontend origin allowlist.
-// Configure CLIENT_URLS as comma-separated URLs.
-const allowedOrigins = (
+// Frontend origin allowlist configuration
+// Supports CLIENT_URLS / CLIENT_URL, local dev ports, and Vercel deployments
+const configuredOrigins = (
   process.env.CLIENT_URLS ||
   process.env.CLIENT_URL ||
-  'http://localhost:5173'
+  'http://localhost:5173,http://localhost:5174,http://localhost:3000,https://expense-track-seven-smoky.vercel.app'
 )
   .split(',')
   .map(origin => origin.trim())
   .filter(Boolean);
 
+const defaultAllowedOrigins = [
+  'http://localhost:5173',
+  'http://localhost:5174',
+  'http://localhost:3000',
+  'http://127.0.0.1:5173',
+  'http://127.0.0.1:5174',
+  'http://127.0.0.1:3000',
+  'https://expense-track-seven-smoky.vercel.app',
+];
+
+const allowedOrigins = Array.from(new Set([...configuredOrigins, ...defaultAllowedOrigins]));
+
+const isOriginAllowed = (origin) => {
+  // Allow requests with no origin (like mobile apps, curl, Postman, or same-origin)
+  if (!origin) return true;
+  // Direct match against allowlist
+  if (allowedOrigins.includes(origin)) return true;
+  // Allow all STS Fintech Vercel preview/production domains
+  if (/^https:\/\/.*\.vercel\.app$/.test(origin)) return true;
+  // In development, allow any localhost or 127.0.0.1 port
+  if (!isProduction && /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) return true;
+  return false;
+};
+
 const corsOptions = {
   origin: (origin, callback) => {
-    if (!origin || allowedOrigins.includes(origin)) {
+    if (isOriginAllowed(origin)) {
       return callback(null, true);
     }
 
-    return callback(new Error('Origin not allowed by CORS'));
+    // Return null, false to reject CORS cleanly without throwing a 500 unhandled error
+    return callback(null, false);
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
@@ -105,7 +130,8 @@ const corsOptions = {
     'Content-Type',
     'X-CSRF-Token',
     'X-Company-Name',
-    'X-Service'
+    'X-Service',
+    'Authorization'
   ],
 };
 
@@ -890,6 +916,13 @@ app.use((req, res) => {
 
 // Global Error Handler
 app.use((err, req, res, next) => {
+  if (err.message === 'Origin not allowed by CORS') {
+    return res.status(403).json({
+      success: false,
+      message: 'Origin not allowed by CORS',
+      company: COMPANY_NAME,
+    });
+  }
   console.error('[Unhandled Error]:', err.stack);
   res.status(500).json({
     success: false,
