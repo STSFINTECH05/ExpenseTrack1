@@ -145,11 +145,76 @@ const initDatabase = async (client = pool) => {
 
     ALTER TABLE finance_records ADD COLUMN IF NOT EXISTS wallet_id VARCHAR(100);
     ALTER TABLE finance_records ADD COLUMN IF NOT EXISTS user_id VARCHAR(255);
+
+    -- 6. bills (strictly user scoped)
+    CREATE TABLE IF NOT EXISTS bills (
+      id SERIAL PRIMARY KEY,
+      name VARCHAR(255) NOT NULL,
+      description TEXT DEFAULT '',
+      date DATE DEFAULT CURRENT_DATE,
+      due_date DATE DEFAULT CURRENT_DATE,
+      time VARCHAR(50),
+      schedule VARCHAR(100) DEFAULT 'Monthly (1st)',
+      category VARCHAR(100) DEFAULT 'Utilities',
+      associated_wallet VARCHAR(100) DEFAULT 'Primary Wallet',
+      amount NUMERIC(12, 2) NOT NULL DEFAULT 0.00,
+      status VARCHAR(50) DEFAULT 'pending',
+      user_id VARCHAR(255) NOT NULL,
+      created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    );
+
+    ALTER TABLE bills ADD COLUMN IF NOT EXISTS due_date DATE DEFAULT CURRENT_DATE;
+    ALTER TABLE bills ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT 'pending';
+    ALTER TABLE bills ADD COLUMN IF NOT EXISTS user_id VARCHAR(255);
+    CREATE INDEX IF NOT EXISTS idx_bills_user_id ON bills(user_id);
+
+    -- 7. goal_targets (strictly user scoped)
+    CREATE TABLE IF NOT EXISTS goal_targets (
+      id SERIAL PRIMARY KEY,
+      name VARCHAR(255) NOT NULL,
+      target_amount NUMERIC(12, 2) NOT NULL DEFAULT 0.00,
+      saved_amount NUMERIC(12, 2) NOT NULL DEFAULT 0.00,
+      description TEXT DEFAULT '',
+      status VARCHAR(50) DEFAULT 'in_progress',
+      type VARCHAR(100) DEFAULT 'goal',
+      balance NUMERIC(12, 2) DEFAULT 0.00,
+      user_id VARCHAR(255) NOT NULL,
+      created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    );
+
+    ALTER TABLE goal_targets ADD COLUMN IF NOT EXISTS type VARCHAR(100) DEFAULT 'goal';
+    ALTER TABLE goal_targets ADD COLUMN IF NOT EXISTS balance NUMERIC(12, 2) DEFAULT 0.00;
+    ALTER TABLE goal_targets ADD COLUMN IF NOT EXISTS user_id VARCHAR(255);
+    CREATE INDEX IF NOT EXISTS idx_goal_targets_user_id ON goal_targets(user_id);
+
+    -- 8. expenses (strictly user scoped)
+    CREATE TABLE IF NOT EXISTS expenses (
+      id SERIAL PRIMARY KEY,
+      name VARCHAR(255) NOT NULL,
+      description TEXT DEFAULT '',
+      date DATE DEFAULT CURRENT_DATE,
+      time VARCHAR(50),
+      category VARCHAR(100) DEFAULT 'General',
+      associated_wallet VARCHAR(100) DEFAULT 'Primary Wallet',
+      amount NUMERIC(12, 2) NOT NULL DEFAULT 0.00,
+      type VARCHAR(50) DEFAULT 'additional_expense',
+      user_id VARCHAR(255) NOT NULL,
+      created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    );
+
+    ALTER TABLE expenses ADD COLUMN IF NOT EXISTS type VARCHAR(50) DEFAULT 'additional_expense';
+    ALTER TABLE expenses ADD COLUMN IF NOT EXISTS user_id VARCHAR(255);
+    CREATE INDEX IF NOT EXISTS idx_expenses_user_id ON expenses(user_id);
+
+    -- User-scoping indexes for existing tables
+    CREATE INDEX IF NOT EXISTS idx_segregation_user_id ON segregation(user_id);
+    CREATE INDEX IF NOT EXISTS idx_goal_wallets_user_id ON goal_wallets(user_id);
+    CREATE INDEX IF NOT EXISTS idx_wallets_user_id ON wallets(user_id);
   `;
 
   try {
     await client.query(bootstrapSql);
-    console.log('✅ [STS FINTECH] PostgreSQL tables verified and initialized: "wallets", "segregation", "payments", "goal_wallets", "finance_records".');
+    console.log('✅ [STS FINTECH] PostgreSQL tables verified and initialized: "wallets", "segregation", "payments", "goal_wallets", "finance_records", "bills", "goal_targets", "expenses".');
   } catch (err) {
     console.error(
       '❌ [STS FINTECH] Database initialization failed:',

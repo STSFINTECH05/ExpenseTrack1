@@ -12,8 +12,24 @@ const authRoutes = require('./routes/auth.routes');
 
 const isDatabaseConfigured = Boolean(process.env.DATABASE_URL);
 
-// In-memory goal wallets store for memory-backed operation when DATABASE_URL is not provided or offline
+// In-memory data stores for memory-backed operation when DATABASE_URL is not provided or offline
 const inMemoryGoalWallets = [];
+const inMemorySegregation = [];
+const inMemoryBills = [];
+const inMemoryPayments = [];
+
+const getUserId = (req) => {
+  return (
+    req.user?.id ||
+    req.user?.user_id ||
+    req.user?._id ||
+    req.userId ||
+    req.session?.userId ||
+    req.headers['x-user-id'] ||
+    req.headers['x-auth-user-id'] ||
+    null
+  );
+};
 
 const query = async (text, params = []) => {
   if (isDatabaseConfigured && pool) {
@@ -26,26 +42,61 @@ const query = async (text, params = []) => {
         (err.errors && err.errors.some((e) => e.code === 'ECONNREFUSED')) ||
         err.message?.includes('ECONNREFUSED');
       if (!isConnErr) throw err;
-      console.warn('[STS FINTECH] Database connection unavailable; utilizing in-memory wallet store.');
+      console.warn('[STS FINTECH] Database connection unavailable; utilizing in-memory store.');
     }
   }
 
-  // Handle in-memory query simulation for wallets when database is unavailable or not configured
+  // Handle in-memory query simulation with user scoping when database is offline
   const sql = (typeof text === 'string' ? text : text?.text || '').toLowerCase();
 
-  // Check DELETE first
-  if (sql.includes('delete from goal_wallets') || sql.includes('delete from wallets')) {
+  // DELETE
+  if (sql.includes('delete from goal_wallets') || sql.includes('delete from wallets') || sql.includes('delete from goal_targets')) {
     const id = params[0];
-    const idx = inMemoryGoalWallets.findIndex((w) => String(w.id) === String(id));
-    if (idx !== -1) inMemoryGoalWallets.splice(idx, 1);
-    return { rows: [{ id }] };
+    const userId = params[1];
+    const idx = inMemoryGoalWallets.findIndex(
+      (w) => String(w.id) === String(id) && (!userId || String(w.user_id) === String(userId))
+    );
+    if (idx !== -1) {
+      const removed = inMemoryGoalWallets.splice(idx, 1);
+      return { rows: removed };
+    }
+    return { rows: [] };
   }
 
-  // Check UPDATE second
+  if (sql.includes('delete from bills')) {
+    const id = params[0];
+    const userId = params[1];
+    const idx = inMemoryBills.findIndex(
+      (b) => String(b.id) === String(id) && (!userId || String(b.user_id) === String(userId))
+    );
+    if (idx !== -1) {
+      const removed = inMemoryBills.splice(idx, 1);
+      return { rows: removed };
+    }
+    return { rows: [] };
+  }
+
+  if (sql.includes('delete from segregation') || sql.includes('delete from finance_records') || sql.includes('delete from expenses')) {
+    const id = params[0];
+    const userId = params[1];
+    const idx = inMemorySegregation.findIndex(
+      (s) => String(s.id) === String(id) && (!userId || String(s.user_id) === String(userId))
+    );
+    if (idx !== -1) {
+      const removed = inMemorySegregation.splice(idx, 1);
+      return { rows: removed };
+    }
+    return { rows: [] };
+  }
+
+  // UPDATE
   if (sql.includes('update goal_wallets') || sql.includes('update wallets')) {
     const amount = parseFloat(params[0]) || 0;
     const id = params[1];
-    const item = inMemoryGoalWallets.find((w) => String(w.id) === String(id));
+    const userId = params[2];
+    const item = inMemoryGoalWallets.find(
+      (w) => String(w.id) === String(id) && (!userId || String(w.user_id) === String(userId))
+    );
     if (item) {
       item.saved_amount = (parseFloat(item.saved_amount) || 0) + amount;
       if (item.saved_amount >= item.target_amount) {
@@ -56,14 +107,45 @@ const query = async (text, params = []) => {
     return { rows: [] };
   }
 
-  // Check SELECT third
-  if (sql.includes('from goal_wallets') || sql.includes('from wallets')) {
+  // SELECT
+  if (sql.includes('from goal_wallets') || sql.includes('from wallets') || sql.includes('from goal_targets')) {
     if (sql.includes('where id =')) {
       const id = params[0];
-      const found = inMemoryGoalWallets.find((w) => String(w.id) === String(id));
+      const userId = params[1];
+      const found = inMemoryGoalWallets.find(
+        (w) => String(w.id) === String(id) && (!userId || String(w.user_id) === String(userId))
+      );
       return { rows: found ? [found] : [] };
     }
-    return { rows: [...inMemoryGoalWallets] };
+    const userId = params[0];
+    const list = userId ? inMemoryGoalWallets.filter((w) => String(w.user_id) === String(userId)) : [];
+    return { rows: [...list] };
+  }
+
+  if (sql.includes('from bills')) {
+    const userId = params[0];
+    const list = userId ? inMemoryBills.filter((b) => String(b.user_id) === String(userId)) : [];
+    return { rows: [...list] };
+  }
+
+  if (sql.includes('from segregation') || sql.includes('from finance_records') || sql.includes('from expenses')) {
+    if (params.length === 2) {
+      const type = params[0];
+      const userId = params[1];
+      const list = inMemorySegregation.filter(
+        (s) => s.type === type && (!userId || String(s.user_id) === String(userId))
+      );
+      return { rows: [...list] };
+    }
+    const userId = params[0];
+    const list = userId ? inMemorySegregation.filter((s) => String(s.user_id) === String(userId)) : [];
+    return { rows: [...list] };
+  }
+
+  if (sql.includes('from payments')) {
+    const userId = params[0];
+    const list = userId ? inMemoryPayments.filter((p) => String(p.user_id) === String(userId)) : [];
+    return { rows: [...list] };
   }
 
   return { rows: [] };
@@ -171,6 +253,7 @@ app.use('/api', csrfProtection);
 // Authentication endpoints (/api/auth/login, /api/auth/register, /api/auth/csrf, /api/auth/me, /api/auth/logout)
 app.use('/api/auth', authRoutes);
 
+<<<<<<< HEAD
 // Optional session user resolver: populates req.user if session exists, without blocking unauthenticated calls
 app.use(async (req, res, next) => {
   if (req.session?.userId) {
@@ -219,10 +302,84 @@ app.get('/api/payments', async (req, res) => {
     const formattedRows = rows.map((row) => ({
       ...row,
       amount: parseFloat(row.amount) || 0,
+=======
+// Public Health Check
+app.get('/api/health', (req, res) => {
+  res.json({
+    status: 'ok',
+    service: 'ExpenseTrack-API',
+    company: COMPANY_NAME,
+    timestamp: new Date().toISOString(),
+  });
+});
+
+// Protect all remaining API endpoints
+app.use('/api', authenticate);
+
+/**
+ * GET /api/bills
+ * Retrieve scheduled bills strictly scoped to authenticated user
+ */
+app.get('/api/bills', async (req, res) => {
+  try {
+    const userId = getUserId(req);
+    if (!userId) {
+      return res.status(401).json({ success: false, message: 'Authentication required' });
+    }
+
+    let result = { rows: [] };
+    try {
+      const selectQuery = `
+        SELECT id, name, description, date, COALESCE(due_date, date) AS due_date, time, schedule, category, associated_wallet, amount, status, user_id, created_at
+        FROM bills
+        WHERE user_id = $1
+        ORDER BY date DESC, created_at DESC;
+      `;
+      result = await query(selectQuery, [userId]);
+    } catch (err) {
+      console.error('Error querying bills table:', err.message);
+      // Fallback to segregation WHERE type = 'bill' AND user_id = $1
+      try {
+        const fallbackQuery = `
+          SELECT id, type, name, description, date, time, schedule, category, associated_wallet, amount, user_id, created_at
+          FROM segregation
+          WHERE type = 'bill' AND user_id = $1
+          ORDER BY date DESC, created_at DESC;
+        `;
+        result = await query(fallbackQuery, [userId]);
+      } catch (err2) {
+        console.error('Fallback query error:', err2.message);
+        return res.status(200).json({ success: true, count: 0, data: [] });
+      }
+    }
+
+    if (!result || !result.rows || result.rows.length === 0) {
+      // Check segregation table if bills table was empty
+      try {
+        const fallbackQuery = `
+          SELECT id, type, name, description, date, time, schedule, category, associated_wallet, amount, user_id, created_at
+          FROM segregation
+          WHERE type = 'bill' AND user_id = $1
+          ORDER BY date DESC, created_at DESC;
+        `;
+        const fbResult = await query(fallbackQuery, [userId]);
+        if (fbResult && fbResult.rows && fbResult.rows.length > 0) {
+          result = fbResult;
+        }
+      } catch (e) {}
+    }
+
+    const rows = (result?.rows || []).map((row) => ({
+      ...row,
+      amount: parseFloat(row.amount) || 0,
+      date: row.date ? (typeof row.date === 'string' ? row.date.split('T')[0] : new Date(row.date).toISOString().split('T')[0]) : null,
+      due_date: row.due_date ? (typeof row.due_date === 'string' ? row.due_date.split('T')[0] : new Date(row.due_date).toISOString().split('T')[0]) : null,
+>>>>>>> 68a4c6f (data updates)
     }));
 
     return res.status(200).json({
       success: true,
+<<<<<<< HEAD
       count: formattedRows.length,
       data: formattedRows,
       company: COMPANY_NAME,
@@ -235,10 +392,20 @@ app.get('/api/payments', async (req, res) => {
       data: [],
       company: COMPANY_NAME,
     });
+=======
+      count: rows.length,
+      data: rows,
+      company: COMPANY_NAME,
+    });
+  } catch (err) {
+    console.error('GET /api/bills error:', err);
+    return res.status(500).json({ success: false, message: 'Error retrieving bills', error: err.message });
+>>>>>>> 68a4c6f (data updates)
   }
 });
 
 /**
+<<<<<<< HEAD
  * POST /api/payments
  * Validate and insert a new payment record
  */
@@ -287,16 +454,295 @@ app.post('/api/payments', async (req, res) => {
       message: 'Internal server error while creating payment',
       error: error.message,
     });
+=======
+ * POST /api/bills
+ * Add a new bill with automatic user_id assignment
+ */
+app.post('/api/bills', async (req, res) => {
+  try {
+    const userId = getUserId(req);
+    if (!userId) {
+      return res.status(401).json({ success: false, message: 'Authentication required' });
+    }
+
+    const {
+      name,
+      description = '',
+      date,
+      due_date,
+      time,
+      schedule = 'Monthly (1st)',
+      category = 'Utilities',
+      associated_wallet = 'Primary Wallet',
+      amount = 0,
+    } = req.body;
+
+    if (!name || typeof name !== 'string' || name.trim().length === 0) {
+      return res.status(400).json({ success: false, message: 'Bill name is required.' });
+    }
+
+    const numericAmount = parseFloat(amount);
+    if (isNaN(numericAmount) || numericAmount < 0) {
+      return res.status(400).json({ success: false, message: 'Amount must be a valid positive number or 0.' });
+    }
+
+    const cleanDate = date || due_date || new Date().toISOString().split('T')[0];
+    const cleanDueDate = due_date || cleanDate;
+    const cleanTime = time || new Date().toTimeString().slice(0, 5);
+
+    let createdRecord = null;
+    const insertParams = [
+      name.trim(),
+      description.trim(),
+      cleanDate,
+      cleanDueDate,
+      cleanTime,
+      schedule,
+      category,
+      associated_wallet,
+      numericAmount,
+      userId,
+    ];
+
+    try {
+      const insertQuery = `
+        INSERT INTO bills (name, description, date, due_date, time, schedule, category, associated_wallet, amount, user_id)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        RETURNING *;
+      `;
+      const result = await query(insertQuery, insertParams);
+      if (result && result.rows && result.rows.length > 0) {
+        createdRecord = {
+          ...result.rows[0],
+          amount: parseFloat(result.rows[0].amount),
+        };
+      }
+    } catch (dbErr) {
+      console.error('Error inserting into bills table:', dbErr.message);
+    }
+
+    // Sync into segregation table with type = 'bill' and user_id
+    try {
+      const syncQuery = `
+        INSERT INTO segregation (type, name, description, date, time, schedule, category, associated_wallet, amount, user_id)
+        VALUES ('bill', $1, $2, $3, $4, $5, $6, $7, $8, $9)
+        RETURNING id, type, name, description, date, time, schedule, category, associated_wallet, amount, user_id, created_at;
+      `;
+      const segResult = await query(syncQuery, [
+        name.trim(),
+        description.trim(),
+        cleanDate,
+        cleanTime,
+        schedule,
+        category,
+        associated_wallet,
+        numericAmount,
+        userId,
+      ]);
+      if (!createdRecord && segResult && segResult.rows && segResult.rows.length > 0) {
+        createdRecord = {
+          ...segResult.rows[0],
+          amount: parseFloat(segResult.rows[0].amount),
+        };
+      }
+    } catch (syncErr) {
+      console.error('Error syncing bill to segregation:', syncErr.message);
+    }
+
+    if (!createdRecord) {
+      createdRecord = {
+        id: Date.now(),
+        name: name.trim(),
+        description: description.trim(),
+        date: cleanDate,
+        due_date: cleanDueDate,
+        time: cleanTime,
+        schedule,
+        category,
+        associated_wallet,
+        amount: numericAmount,
+        user_id: userId,
+        created_at: new Date().toISOString(),
+      };
+      inMemoryBills.unshift(createdRecord);
+    }
+
+    return res.status(201).json({
+      success: true,
+      message: 'Bill created successfully',
+      data: createdRecord,
+      company: COMPANY_NAME,
+    });
+  } catch (err) {
+    console.error('POST /api/bills error:', err);
+    return res.status(500).json({ success: false, message: 'Internal server error while creating bill', error: err.message });
+  }
+});
+
+/**
+ * PUT /api/bills/:id
+ * Update an existing bill strictly scoped by user_id
+ */
+app.put('/api/bills/:id', async (req, res) => {
+  try {
+    const userId = getUserId(req);
+    if (!userId) {
+      return res.status(401).json({ success: false, message: 'Authentication required' });
+    }
+
+    const { id } = req.params;
+    const {
+      name,
+      description = '',
+      date,
+      due_date,
+      time,
+      schedule = 'Monthly (1st)',
+      category = 'Utilities',
+      associated_wallet = 'Primary Wallet',
+      amount = 0,
+    } = req.body;
+
+    if (!name || typeof name !== 'string' || name.trim().length === 0) {
+      return res.status(400).json({ success: false, message: 'Bill name is required.' });
+    }
+
+    const numericAmount = parseFloat(amount);
+    if (isNaN(numericAmount) || numericAmount < 0) {
+      return res.status(400).json({ success: false, message: 'Amount must be a valid positive number.' });
+    }
+
+    const cleanDate = date || due_date || new Date().toISOString().split('T')[0];
+    const cleanDueDate = due_date || cleanDate;
+    const cleanTime = time || new Date().toTimeString().slice(0, 5);
+
+    let updatedRecord = null;
+    try {
+      const updateQuery = `
+        UPDATE bills
+        SET name = $1, description = $2, date = $3, due_date = $4, time = $5, schedule = $6, category = $7, associated_wallet = $8, amount = $9
+        WHERE id = $10 AND user_id = $11
+        RETURNING *;
+      `;
+      const result = await query(updateQuery, [
+        name.trim(),
+        description.trim(),
+        cleanDate,
+        cleanDueDate,
+        cleanTime,
+        schedule,
+        category,
+        associated_wallet,
+        numericAmount,
+        parseInt(id, 10),
+        userId,
+      ]);
+      if (result && result.rows && result.rows.length > 0) {
+        updatedRecord = {
+          ...result.rows[0],
+          amount: parseFloat(result.rows[0].amount),
+        };
+      }
+    } catch (e) {}
+
+    // Also update segregation if exists
+    try {
+      const updateSegQuery = `
+        UPDATE segregation
+        SET name = $1, description = $2, date = $3, time = $4, schedule = $5, category = $6, associated_wallet = $7, amount = $8
+        WHERE id = $9 AND user_id = $10
+        RETURNING *;
+      `;
+      const segResult = await query(updateSegQuery, [
+        name.trim(),
+        description.trim(),
+        cleanDate,
+        cleanTime,
+        schedule,
+        category,
+        associated_wallet,
+        numericAmount,
+        parseInt(id, 10),
+        userId,
+      ]);
+      if (!updatedRecord && segResult && segResult.rows && segResult.rows.length > 0) {
+        updatedRecord = {
+          ...segResult.rows[0],
+          amount: parseFloat(segResult.rows[0].amount),
+        };
+      }
+    } catch (e) {}
+
+    if (!updatedRecord) {
+      return res.status(404).json({ success: false, message: 'Bill not found or unauthorized' });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: 'Bill updated successfully',
+      data: updatedRecord,
+      company: COMPANY_NAME,
+    });
+  } catch (err) {
+    console.error('PUT /api/bills/:id error:', err);
+    return res.status(500).json({ success: false, message: 'Internal server error while updating bill', error: err.message });
+  }
+});
+
+/**
+ * DELETE /api/bills/:id
+ * Remove a bill strictly scoped by user_id
+ */
+app.delete('/api/bills/:id', async (req, res) => {
+  try {
+    const userId = getUserId(req);
+    if (!userId) {
+      return res.status(401).json({ success: false, message: 'Authentication required' });
+    }
+
+    const { id } = req.params;
+    let deleted = false;
+
+    try {
+      const deleteBillsQuery = `DELETE FROM bills WHERE id = $1 AND user_id = $2 RETURNING id;`;
+      const bRes = await query(deleteBillsQuery, [parseInt(id, 10), userId]);
+      if (bRes && bRes.rows && bRes.rows.length > 0) deleted = true;
+    } catch (e) {}
+
+    try {
+      const deleteSegQuery = `DELETE FROM segregation WHERE id = $1 AND user_id = $2 RETURNING id;`;
+      const sRes = await query(deleteSegQuery, [parseInt(id, 10), userId]);
+      if (sRes && sRes.rows && sRes.rows.length > 0) deleted = true;
+    } catch (e) {}
+
+    if (!deleted) {
+      return res.status(404).json({ success: false, message: 'Bill not found or unauthorized' });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: 'Bill deleted successfully',
+      id: parseInt(id, 10),
+      company: COMPANY_NAME,
+    });
+  } catch (err) {
+    console.error('DELETE /api/bills/:id error:', err);
+    return res.status(500).json({ success: false, message: 'Internal server error while deleting bill', error: err.message });
+>>>>>>> 68a4c6f (data updates)
   }
 });
 
 /**
  * GET /api/segregation
- * Retrieve finance segregation records, with optional ?type= filter
- * (e.g., 'additional_income', 'additional_expense', 'fixed_income', 'fixed_expense', 'bill')
+ * Retrieve finance segregation records strictly scoped to authenticated user
  */
 app.get('/api/segregation', async (req, res) => {
   try {
+    const userId = getUserId(req);
+    if (!userId) {
+      return res.status(401).json({ success: false, message: 'Authentication required' });
+    }
+
     const { type } = req.query;
     let result = { rows: [] };
 
@@ -304,26 +750,33 @@ app.get('/api/segregation', async (req, res) => {
       const selectQuery = type
         ? `SELECT id, type, name, description, date, time, schedule, category, associated_wallet, wallet_id, amount, user_id, created_at
            FROM segregation
-           WHERE type = $1
+           WHERE type = $1 AND user_id = $2
            ORDER BY date DESC, created_at DESC;`
         : `SELECT id, type, name, description, date, time, schedule, category, associated_wallet, wallet_id, amount, user_id, created_at
            FROM segregation
+           WHERE user_id = $1
            ORDER BY date DESC, created_at DESC;`;
-      result = await query(selectQuery, type ? [type] : []);
+      result = await query(selectQuery, type ? [type, userId] : [userId]);
     } catch (err) {
+<<<<<<< HEAD
       console.error('Error querying segregation table:', err.message);
+=======
+      console.error('Error querying segregation:', err.message);
+>>>>>>> 68a4c6f (data updates)
       // Fallback to finance_records if segregation table query failed
       try {
         const selectQuery = type
           ? `SELECT id, type, name, description, date, time, schedule, category, associated_wallet, wallet_id, amount, user_id, created_at
              FROM finance_records
-             WHERE type = $1
+             WHERE type = $1 AND user_id = $2
              ORDER BY date DESC, created_at DESC;`
           : `SELECT id, type, name, description, date, time, schedule, category, associated_wallet, wallet_id, amount, user_id, created_at
              FROM finance_records
+             WHERE user_id = $1
              ORDER BY date DESC, created_at DESC;`;
-        result = await query(selectQuery, type ? [type] : []);
+        result = await query(selectQuery, type ? [type, userId] : [userId]);
       } catch (err2) {
+<<<<<<< HEAD
         console.error('Error querying finance_records fallback:', err2.message);
         return res.status(200).json({
           success: true,
@@ -331,10 +784,15 @@ app.get('/api/segregation', async (req, res) => {
           data: [],
           company: COMPANY_NAME,
         });
+=======
+        console.error('Fallback finance_records error:', err2.message);
+        return res.status(200).json({ success: true, count: 0, data: [] });
+>>>>>>> 68a4c6f (data updates)
       }
     }
 
     if (!result || !result.rows || result.rows.length === 0) {
+<<<<<<< HEAD
       // If segregation table was empty, check if finance_records has rows
       try {
         const fallbackQuery = type
@@ -356,6 +814,26 @@ app.get('/api/segregation', async (req, res) => {
 
     const rows = (result && result.rows) || [];
     const formattedRows = rows.map((row) => ({
+=======
+      // If type === 'bill' and segregation is empty, check bills table
+      if (type === 'bill') {
+        try {
+          const bResult = await query(
+            `SELECT id, 'bill' AS type, name, description, date, time, schedule, category, associated_wallet, amount, user_id, created_at
+             FROM bills
+             WHERE user_id = $1
+             ORDER BY date DESC, created_at DESC;`,
+            [userId]
+          );
+          if (bResult && bResult.rows && bResult.rows.length > 0) {
+            result = bResult;
+          }
+        } catch (e) {}
+      }
+    }
+
+    const formattedRows = (result?.rows || []).map((row) => ({
+>>>>>>> 68a4c6f (data updates)
       ...row,
       amount: parseFloat(row.amount) || 0,
       date: row.date
@@ -375,6 +853,7 @@ app.get('/api/segregation', async (req, res) => {
       company: COMPANY_NAME,
     });
   } catch (err) {
+<<<<<<< HEAD
     console.error('Unhandled segregation fetch error:', err.message);
     return res.status(200).json({
       success: true,
@@ -382,15 +861,24 @@ app.get('/api/segregation', async (req, res) => {
       data: [],
       company: COMPANY_NAME,
     });
+=======
+    console.error('GET /api/segregation error:', err.message);
+    return res.status(200).json({ success: true, count: 0, data: [] });
+>>>>>>> 68a4c6f (data updates)
   }
 });
 
 /**
  * POST /api/segregation
- * Validate and persist new finance records submitted from UI modal
+ * Validate and persist new finance records scoped to user_id
  */
 app.post('/api/segregation', async (req, res) => {
   try {
+    const userId = getUserId(req);
+    if (!userId) {
+      return res.status(401).json({ success: false, message: 'Authentication required' });
+    }
+
     const {
       type,
       name,
@@ -441,22 +929,23 @@ app.post('/api/segregation', async (req, res) => {
       category,
       associated_wallet,
       numericAmount,
+      userId,
     ];
 
     try {
       const insertSegregationQuery = `
-        INSERT INTO segregation (type, name, description, date, time, schedule, category, associated_wallet, amount)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-        RETURNING id, type, name, description, date, time, schedule, category, associated_wallet, amount, created_at;
+        INSERT INTO segregation (type, name, description, date, time, schedule, category, associated_wallet, amount, user_id)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        RETURNING id, type, name, description, date, time, schedule, category, associated_wallet, amount, user_id, created_at;
       `;
       result = await query(insertSegregationQuery, insertParams);
     } catch (e) {}
 
     try {
       const insertFinanceQuery = `
-        INSERT INTO finance_records (type, name, description, date, time, schedule, category, associated_wallet, amount)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-        RETURNING id, type, name, description, date, time, schedule, category, associated_wallet, amount, created_at;
+        INSERT INTO finance_records (type, name, description, date, time, schedule, category, associated_wallet, amount, user_id)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        RETURNING id, type, name, description, date, time, schedule, category, associated_wallet, amount, user_id, created_at;
       `;
       const resFinance = await query(insertFinanceQuery, insertParams);
       if (!result || !result.rows || result.rows.length === 0) {
@@ -464,12 +953,53 @@ app.post('/api/segregation', async (req, res) => {
       }
     } catch (e) {}
 
-    const createdRecord = {
-      ...result.rows[0],
-      amount: parseFloat(result.rows[0].amount),
-    };
+    // If type === 'bill', also sync into bills table
+    if (type === 'bill') {
+      try {
+        await query(
+          `INSERT INTO bills (name, description, date, due_date, time, schedule, category, associated_wallet, amount, user_id)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10);`,
+          [name.trim(), description.trim(), cleanDate, cleanDate, cleanTime, schedule, category, associated_wallet, numericAmount, userId]
+        );
+      } catch (e) {}
+    }
 
-    console.log(`[STS FINTECH] Segregation record created: ${createdRecord.type} - "${createdRecord.name}" (₹${createdRecord.amount})`);
+    // If type is expense, sync into expenses table
+    if (type === 'additional_expense' || type === 'fixed_expense') {
+      try {
+        await query(
+          `INSERT INTO expenses (name, description, date, time, category, associated_wallet, amount, type, user_id)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9);`,
+          [name.trim(), description.trim(), cleanDate, cleanTime, category, associated_wallet, numericAmount, type, userId]
+        );
+      } catch (e) {}
+    }
+
+    let createdRecord;
+    if (result && result.rows && result.rows.length > 0) {
+      createdRecord = {
+        ...result.rows[0],
+        amount: parseFloat(result.rows[0].amount),
+      };
+    } else {
+      createdRecord = {
+        id: Date.now(),
+        type,
+        name: name.trim(),
+        description: description.trim(),
+        date: cleanDate,
+        time: cleanTime,
+        schedule,
+        category,
+        associated_wallet,
+        amount: numericAmount,
+        user_id: userId,
+        created_at: new Date().toISOString(),
+      };
+      inMemorySegregation.unshift(createdRecord);
+    }
+
+    console.log(`[STS FINTECH] Segregation record created: ${createdRecord.type} - "${createdRecord.name}" (₹${createdRecord.amount}) for user ${userId}`);
 
     return res.status(201).json({
       success: true,
@@ -489,10 +1019,15 @@ app.post('/api/segregation', async (req, res) => {
 
 /**
  * PUT /api/segregation/:id
- * Update an existing finance record
+ * Update an existing finance record strictly scoped by user_id
  */
 app.put('/api/segregation/:id', async (req, res) => {
   try {
+    const userId = getUserId(req);
+    if (!userId) {
+      return res.status(401).json({ success: false, message: 'Authentication required' });
+    }
+
     const { id } = req.params;
     const {
       name,
@@ -533,6 +1068,7 @@ app.put('/api/segregation/:id', async (req, res) => {
       associated_wallet,
       numericAmount,
       parseInt(id, 10),
+      userId,
     ];
 
     let result;
@@ -540,8 +1076,8 @@ app.put('/api/segregation/:id', async (req, res) => {
       const updateSegQuery = `
         UPDATE segregation
         SET name = $1, description = $2, date = $3, time = $4, schedule = $5, category = $6, associated_wallet = $7, amount = $8
-        WHERE id = $9
-        RETURNING id, type, name, description, date, time, schedule, category, associated_wallet, amount, created_at;
+        WHERE id = $9 AND user_id = $10
+        RETURNING id, type, name, description, date, time, schedule, category, associated_wallet, amount, user_id, created_at;
       `;
       result = await query(updateSegQuery, updateParams);
     } catch (e) {}
@@ -550,8 +1086,8 @@ app.put('/api/segregation/:id', async (req, res) => {
       const updateFinanceQuery = `
         UPDATE finance_records
         SET name = $1, description = $2, date = $3, time = $4, schedule = $5, category = $6, associated_wallet = $7, amount = $8
-        WHERE id = $9
-        RETURNING id, type, name, description, date, time, schedule, category, associated_wallet, amount, created_at;
+        WHERE id = $9 AND user_id = $10
+        RETURNING id, type, name, description, date, time, schedule, category, associated_wallet, amount, user_id, created_at;
       `;
       const resFin = await query(updateFinanceQuery, updateParams);
       if (!result || !result.rows || result.rows.length === 0) {
@@ -562,7 +1098,7 @@ app.put('/api/segregation/:id', async (req, res) => {
     if (!result || !result.rows || result.rows.length === 0) {
       return res.status(404).json({
         success: false,
-        message: 'Record not found',
+        message: 'Record not found or unauthorized',
       });
     }
 
@@ -592,25 +1128,41 @@ app.put('/api/segregation/:id', async (req, res) => {
 
 /**
  * DELETE /api/segregation/:id
- * Remove a finance record
+ * Remove a finance record strictly scoped by user_id
  */
 app.delete('/api/segregation/:id', async (req, res) => {
   try {
-    const { id } = req.params;
-    try {
-      await query(`DELETE FROM segregation WHERE id = $1;`, [parseInt(id, 10)]);
-    } catch (e) {}
-    const deleteQuery = `DELETE FROM finance_records WHERE id = $1 RETURNING id;`;
-    const result = await query(deleteQuery, [parseInt(id, 10)]);
+    const userId = getUserId(req);
+    if (!userId) {
+      return res.status(401).json({ success: false, message: 'Authentication required' });
+    }
 
-    if (!result.rows || result.rows.length === 0) {
+    const { id } = req.params;
+    let deleted = false;
+
+    try {
+      const sRes = await query(`DELETE FROM segregation WHERE id = $1 AND user_id = $2 RETURNING id;`, [parseInt(id, 10), userId]);
+      if (sRes && sRes.rows && sRes.rows.length > 0) deleted = true;
+    } catch (e) {}
+
+    try {
+      const fRes = await query(`DELETE FROM finance_records WHERE id = $1 AND user_id = $2 RETURNING id;`, [parseInt(id, 10), userId]);
+      if (fRes && fRes.rows && fRes.rows.length > 0) deleted = true;
+    } catch (e) {}
+
+    try {
+      const bRes = await query(`DELETE FROM bills WHERE id = $1 AND user_id = $2 RETURNING id;`, [parseInt(id, 10), userId]);
+      if (bRes && bRes.rows && bRes.rows.length > 0) deleted = true;
+    } catch (e) {}
+
+    if (!deleted) {
       return res.status(404).json({
         success: false,
-        message: 'Record not found',
+        message: 'Record not found or unauthorized',
       });
     }
 
-    console.log(`[STS FINTECH] Segregation record deleted: ID ${id}`);
+    console.log(`[STS FINTECH] Segregation record deleted: ID ${id} for user ${userId}`);
 
     return res.status(200).json({
       success: true,
@@ -630,56 +1182,77 @@ app.delete('/api/segregation/:id', async (req, res) => {
 
 /**
  * GET /api/wallets
- * Retrieve all segregated goal wallets
+ * Retrieve all segregated goal wallets strictly scoped to authenticated user
  */
 app.get('/api/wallets', async (req, res) => {
   try {
+    const userId = getUserId(req);
+    if (!userId) {
+      return res.status(401).json({ success: false, message: 'Authentication required' });
+    }
+
     let result = { rows: [] };
 
     try {
       const selectQuery = `
         SELECT id, name, target_amount, saved_amount, description, status, type, balance, user_id, created_at
         FROM goal_wallets
+        WHERE user_id = $1
         ORDER BY created_at DESC;
       `;
-      result = await query(selectQuery);
+      result = await query(selectQuery, [userId]);
     } catch (err) {
-      console.error(err.message);
+      console.error('Error querying goal_wallets:', err.message);
       try {
         const fallbackQuery = `
           SELECT id, name, COALESCE(target_amount, balance, 0) AS target_amount, COALESCE(saved_amount, balance, 0) AS saved_amount, description, status, type, balance, user_id, created_at
-          FROM wallets
+          FROM goal_targets
+          WHERE user_id = $1
           ORDER BY created_at DESC;
         `;
-        result = await query(fallbackQuery);
+        result = await query(fallbackQuery, [userId]);
       } catch (err2) {
-        console.error(err2.message);
-        return res.status(200).json([]);
+        try {
+          const fallbackQuery2 = `
+            SELECT id, name, COALESCE(target_amount, balance, 0) AS target_amount, COALESCE(saved_amount, balance, 0) AS saved_amount, description, status, type, balance, user_id, created_at
+            FROM wallets
+            WHERE user_id = $1
+            ORDER BY created_at DESC;
+          `;
+          result = await query(fallbackQuery2, [userId]);
+        } catch (err3) {
+          return res.status(200).json({ success: true, count: 0, data: [] });
+        }
       }
     }
 
     if (!result || !result.rows || result.rows.length === 0) {
-      // Check wallets table if goal_wallets was empty
       try {
         const fallbackQuery = `
           SELECT id, name, COALESCE(target_amount, balance, 0) AS target_amount, COALESCE(saved_amount, balance, 0) AS saved_amount, description, status, type, balance, user_id, created_at
-          FROM wallets
+          FROM goal_targets
+          WHERE user_id = $1
           ORDER BY created_at DESC;
         `;
-        const fbResult = await query(fallbackQuery);
+        const fbResult = await query(fallbackQuery, [userId]);
         if (fbResult && fbResult.rows && fbResult.rows.length > 0) {
           result = fbResult;
+        } else {
+          const fb2 = await query(
+            `SELECT id, name, COALESCE(target_amount, balance, 0) AS target_amount, COALESCE(saved_amount, balance, 0) AS saved_amount, description, status, type, balance, user_id, created_at
+             FROM wallets
+             WHERE user_id = $1
+             ORDER BY created_at DESC;`,
+            [userId]
+          );
+          if (fb2 && fb2.rows && fb2.rows.length > 0) {
+            result = fb2;
+          }
         }
-      } catch (e) {
-        console.error(e.message);
-      }
+      } catch (e) {}
     }
 
-    if (!result || !result.rows || result.rows.length === 0) {
-      return res.status(200).json([]);
-    }
-
-    const formattedRows = result.rows.map((row) => ({
+    const formattedRows = (result?.rows || []).map((row) => ({
       ...row,
       target_amount: parseFloat(row.target_amount) || parseFloat(row.balance) || 0,
       saved_amount: parseFloat(row.saved_amount) || 0,
@@ -692,18 +1265,22 @@ app.get('/api/wallets', async (req, res) => {
       company: COMPANY_NAME,
     });
   } catch (err) {
-    console.error(err.message);
-    return res.status(200).json([]);
+    console.error('GET /api/wallets error:', err.message);
+    return res.status(200).json({ success: true, count: 0, data: [] });
   }
 });
 
 /**
  * POST /api/wallets
- * Setup a new purpose target wallet
+ * Setup a new purpose target wallet scoped to user_id
  */
 app.post('/api/wallets', async (req, res) => {
   try {
-    // 1. Purpose / Item name extraction & validation (supports name, purpose, purposeName, itemName, title)
+    const userId = getUserId(req);
+    if (!userId) {
+      return res.status(401).json({ success: false, message: 'Authentication required' });
+    }
+
     const rawName =
       req.body.name ??
       req.body.purpose ??
@@ -721,7 +1298,6 @@ app.post('/api/wallets', async (req, res) => {
       });
     }
 
-    // 2. Target cap amount extraction & numeric parsing (supports target_amount, targetAmount, target_cap, targetCap, amount)
     const rawTarget =
       req.body.target_amount ??
       req.body.targetAmount ??
@@ -737,29 +1313,14 @@ app.post('/api/wallets', async (req, res) => {
       });
     }
 
-    // 3. Description / notes extraction (supports description, notes, descriptiveNotes)
     const rawDescription = req.body.description ?? req.body.notes ?? req.body.descriptiveNotes ?? '';
     const cleanDescription = typeof rawDescription === 'string' ? rawDescription.trim() : String(rawDescription || '').trim();
 
-    // 4. Type / category extraction (supports type, category)
     const rawType = req.body.type ?? req.body.category ?? 'goal';
     const cleanType = typeof rawType === 'string' && rawType.trim().length > 0 ? rawType.trim() : 'goal';
 
-    // 5. User authentication context parsing (req.user.id, user_id, headers, or body)
-    const userId =
-      req.user?.id ||
-      req.user?.user_id ||
-      req.user?._id ||
-      req.userId ||
-      req.user_id ||
-      req.headers['x-user-id'] ||
-      req.body?.user_id ||
-      req.body?.userId ||
-      null;
-
     let createdWallet = null;
 
-    // 6. Attempt PostgreSQL database insertion if database is configured
     if (isDatabaseConfigured && pool) {
       try {
         const insertFullQuery = `
@@ -787,40 +1348,35 @@ app.post('/api/wallets', async (req, res) => {
         }
       } catch (dbErr) {
         console.error('[STS FINTECH] Error inserting into goal_wallets table:', dbErr.message || dbErr);
-        if (dbErr.detail) console.error('[STS FINTECH] DB Detail:', dbErr.detail);
-        if (dbErr.code) console.error('[STS FINTECH] DB Error Code:', dbErr.code);
 
-        // Fallback: If column user_id / type doesn't exist on older table schema, try standard columns
-        if (dbErr.code === '42703') {
-          try {
-            const insertBaseQuery = `
-              INSERT INTO goal_wallets (name, target_amount, saved_amount, description, status)
-              VALUES ($1, $2, $3, $4, $5)
-              RETURNING id, name, target_amount, saved_amount, description, status, created_at;
-            `;
-            const baseResult = await pool.query(insertBaseQuery, [
-              cleanName,
-              numericTarget,
-              0.0,
-              cleanDescription,
-              'in_progress',
-            ]);
-            if (baseResult.rows && baseResult.rows.length > 0) {
-              createdWallet = {
-                ...baseResult.rows[0],
-                target_amount: parseFloat(baseResult.rows[0].target_amount) || numericTarget,
-                saved_amount: parseFloat(baseResult.rows[0].saved_amount) || 0,
-                type: cleanType,
-                user_id: userId,
-              };
-            }
-          } catch (baseErr) {
-            console.error('[STS FINTECH] Fallback insert into goal_wallets failed:', baseErr.message || baseErr);
+        // Fallback to goal_targets table
+        try {
+          const insertGtQuery = `
+            INSERT INTO goal_targets (name, target_amount, saved_amount, description, status, type, balance, user_id)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            RETURNING id, name, target_amount, saved_amount, description, status, type, balance, user_id, created_at;
+          `;
+          const gtRes = await pool.query(insertGtQuery, [
+            cleanName,
+            numericTarget,
+            0.0,
+            cleanDescription,
+            'in_progress',
+            cleanType,
+            0.0,
+            userId,
+          ]);
+          if (gtRes.rows && gtRes.rows.length > 0) {
+            createdWallet = {
+              ...gtRes.rows[0],
+              target_amount: parseFloat(gtRes.rows[0].target_amount) || numericTarget,
+              saved_amount: parseFloat(gtRes.rows[0].saved_amount) || 0,
+            };
           }
-        }
+        } catch (gtErr) {}
 
-        // Fallback: If goal_wallets table does not exist, try wallets table
-        if (!createdWallet && (dbErr.code === '42P01' || dbErr.message?.includes('does not exist'))) {
+        // Fallback to wallets table
+        if (!createdWallet) {
           try {
             const insertWalletsQuery = `
               INSERT INTO wallets (name, type, balance, target_amount, saved_amount, description, status, user_id)
@@ -844,25 +1400,11 @@ app.post('/api/wallets', async (req, res) => {
                 saved_amount: parseFloat(wResult.rows[0].saved_amount) || 0,
               };
             }
-          } catch (wErr) {
-            console.error('[STS FINTECH] Fallback insert into wallets failed:', wErr.message || wErr);
-          }
-        }
-
-        const isConnErr =
-          dbErr.code === 'ECONNREFUSED' ||
-          dbErr.code === 'ENOTFOUND' ||
-          (dbErr.errors && dbErr.errors.some((e) => e.code === 'ECONNREFUSED')) ||
-          dbErr.message?.includes('ECONNREFUSED');
-
-        // If it's a real SQL constraint/syntax error and not a connection failure, rethrow to trigger 500 logging
-        if (!createdWallet && !isConnErr) {
-          throw dbErr;
+          } catch (wErr) {}
         }
       }
     }
 
-    // 7. In-memory fallback if database is not configured or connection is unavailable
     if (!createdWallet) {
       const nextId =
         inMemoryGoalWallets.length > 0
@@ -882,12 +1424,11 @@ app.post('/api/wallets', async (req, res) => {
         created_at: new Date().toISOString(),
       };
       inMemoryGoalWallets.unshift(createdWallet);
-      console.log(`[STS FINTECH] Goal wallet created (in-memory mode): "${createdWallet.name}" (Target: ₹${createdWallet.target_amount})`);
     } else {
-      // Sync into memory store
       inMemoryGoalWallets.unshift(createdWallet);
-      console.log(`[STS FINTECH] Goal wallet created (database mode): "${createdWallet.name}" (Target: ₹${createdWallet.target_amount})`);
     }
+
+    console.log(`[STS FINTECH] Goal wallet created: "${createdWallet.name}" (Target: ₹${createdWallet.target_amount}) for user ${userId}`);
 
     return res.status(201).json({
       success: true,
@@ -896,33 +1437,26 @@ app.post('/api/wallets', async (req, res) => {
       company: COMPANY_NAME,
     });
   } catch (error) {
-    console.error('[STS FINTECH] Detailed Error in POST /api/wallets:', error);
-    if (error.stack) console.error('[STS FINTECH] Error Stack:', error.stack);
-    if (error.detail) console.error('[STS FINTECH] SQL Error Detail:', error.detail);
-    if (error.hint) console.error('[STS FINTECH] SQL Error Hint:', error.hint);
-    if (error.code) console.error('[STS FINTECH] SQL Error Code:', error.code);
-
-    const errorMessage =
-      error.message ||
-      (error.errors && error.errors.map((e) => e.message).join('; ')) ||
-      error.code ||
-      'Failed to create goal wallet';
-
+    console.error('[STS FINTECH] Error in POST /api/wallets:', error);
     return res.status(500).json({
       success: false,
       message: 'Failed to create goal wallet',
-      error: errorMessage,
-      detail: error.detail || undefined,
+      error: error.message,
     });
   }
 });
 
 /**
  * POST /api/wallets/:id/add-cash
- * Allocate cash towards a goal wallet
+ * Allocate cash towards a goal wallet strictly scoped by user_id
  */
 app.post('/api/wallets/:id/add-cash', async (req, res) => {
   try {
+    const userId = getUserId(req);
+    if (!userId) {
+      return res.status(401).json({ success: false, message: 'Authentication required' });
+    }
+
     const { id } = req.params;
     const { amount } = req.body;
 
@@ -934,17 +1468,24 @@ app.post('/api/wallets/:id/add-cash', async (req, res) => {
       });
     }
 
-    // Check existing wallet and remaining ceiling limit
+    // Check existing wallet strictly scoped by user_id
     const checkQuery = `
       SELECT id, name, target_amount, saved_amount, status
       FROM goal_wallets
-      WHERE id = $1;
+      WHERE id = $1 AND user_id = $2;
     `;
-    const checkResult = await query(checkQuery, [id]);
+    let checkResult = await query(checkQuery, [id, userId]);
+    if (!checkResult.rows || checkResult.rows.length === 0) {
+      // Check goal_targets
+      try {
+        checkResult = await query(`SELECT id, name, target_amount, saved_amount, status FROM goal_targets WHERE id = $1 AND user_id = $2;`, [id, userId]);
+      } catch (e) {}
+    }
+
     if (!checkResult.rows || checkResult.rows.length === 0) {
       return res.status(404).json({
         success: false,
-        message: 'Wallet container not found',
+        message: 'Wallet container not found or unauthorized',
       });
     }
 
@@ -964,16 +1505,29 @@ app.post('/api/wallets/:id/add-cash', async (req, res) => {
       UPDATE goal_wallets
       SET saved_amount = saved_amount + $1,
           status = CASE WHEN (saved_amount + $1) >= target_amount THEN 'target_met' ELSE status END
-      WHERE id = $2
+      WHERE id = $2 AND user_id = $3
       RETURNING id, name, target_amount, saved_amount, description, status, created_at;
     `;
 
-    const result = await query(updateQuery, [numericAmount, id]);
+    let result = await query(updateQuery, [numericAmount, id, userId]);
+
+    if (!result.rows || result.rows.length === 0) {
+      try {
+        result = await query(
+          `UPDATE goal_targets
+           SET saved_amount = saved_amount + $1,
+               status = CASE WHEN (saved_amount + $1) >= target_amount THEN 'target_met' ELSE status END
+           WHERE id = $2 AND user_id = $3
+           RETURNING id, name, target_amount, saved_amount, description, status, created_at;`,
+          [numericAmount, id, userId]
+        );
+      } catch (e) {}
+    }
 
     if (!result.rows || result.rows.length === 0) {
       return res.status(404).json({
         success: false,
-        message: 'Wallet container not found',
+        message: 'Wallet container not found or unauthorized',
       });
     }
 
@@ -1000,13 +1554,43 @@ app.post('/api/wallets/:id/add-cash', async (req, res) => {
 
 /**
  * DELETE /api/wallets/:id
- * Remove a goal wallet
+ * Remove a goal wallet strictly scoped by user_id
  */
 app.delete('/api/wallets/:id', async (req, res) => {
   try {
+    const userId = getUserId(req);
+    if (!userId) {
+      return res.status(401).json({ success: false, message: 'Authentication required' });
+    }
+
     const { id } = req.params;
-    const deleteQuery = `DELETE FROM goal_wallets WHERE id = $1;`;
-    await query(deleteQuery, [id]);
+    let deleted = false;
+
+    try {
+      const deleteQuery = `DELETE FROM goal_wallets WHERE id = $1 AND user_id = $2 RETURNING id;`;
+      const res1 = await query(deleteQuery, [id, userId]);
+      if (res1 && res1.rows && res1.rows.length > 0) deleted = true;
+    } catch (e) {}
+
+    try {
+      const deleteGtQuery = `DELETE FROM goal_targets WHERE id = $1 AND user_id = $2 RETURNING id;`;
+      const res2 = await query(deleteGtQuery, [id, userId]);
+      if (res2 && res2.rows && res2.rows.length > 0) deleted = true;
+    } catch (e) {}
+
+    try {
+      const deleteWQuery = `DELETE FROM wallets WHERE id = $1 AND user_id = $2 RETURNING id;`;
+      const res3 = await query(deleteWQuery, [id, userId]);
+      if (res3 && res3.rows && res3.rows.length > 0) deleted = true;
+    } catch (e) {}
+
+    if (!deleted) {
+      return res.status(404).json({
+        success: false,
+        message: 'Wallet not found or unauthorized',
+      });
+    }
+
     return res.status(200).json({
       success: true,
       message: 'Wallet deleted successfully',
@@ -1016,6 +1600,105 @@ app.delete('/api/wallets/:id', async (req, res) => {
       success: false,
       error: error.message,
     });
+  }
+});
+
+/**
+ * GET /api/payments
+ * Retrieve payments strictly scoped to authenticated user
+ */
+app.get('/api/payments', async (req, res) => {
+  try {
+    const userId = getUserId(req);
+    if (!userId) {
+      return res.status(401).json({ success: false, message: 'Authentication required' });
+    }
+
+    const selectQuery = `
+      SELECT id, name, COALESCE(title, name) AS title, amount, date, status, user_id, created_at
+      FROM payments
+      WHERE user_id = $1
+      ORDER BY date DESC, created_at DESC;
+    `;
+    const result = await query(selectQuery, [userId]);
+    const rows = (result?.rows || []).map((row) => ({
+      ...row,
+      amount: parseFloat(row.amount) || 0,
+      date: row.date ? (typeof row.date === 'string' ? row.date.split('T')[0] : new Date(row.date).toISOString().split('T')[0]) : null,
+    }));
+
+    return res.status(200).json({
+      success: true,
+      count: rows.length,
+      data: rows,
+      company: COMPANY_NAME,
+    });
+  } catch (error) {
+    console.error('GET /api/payments error:', error);
+    return res.status(200).json({ success: true, count: 0, data: [] });
+  }
+});
+
+/**
+ * POST /api/payments
+ * Create a new payment record strictly scoped to user_id
+ */
+app.post('/api/payments', async (req, res) => {
+  try {
+    const userId = getUserId(req);
+    if (!userId) {
+      return res.status(401).json({ success: false, message: 'Authentication required' });
+    }
+
+    const { name, title, amount = 0, date, status = 'completed' } = req.body;
+    const cleanTitle = (title || name || '').trim();
+    if (!cleanTitle) {
+      return res.status(400).json({ success: false, message: 'Payment title/name is required.' });
+    }
+
+    const numericAmount = parseFloat(amount);
+    if (isNaN(numericAmount) || numericAmount < 0) {
+      return res.status(400).json({ success: false, message: 'Amount must be a valid positive number.' });
+    }
+
+    const cleanDate = date || new Date().toISOString().split('T')[0];
+
+    const insertQuery = `
+      INSERT INTO payments (name, title, amount, date, status, user_id)
+      VALUES ($1, $2, $3, $4, $5, $6)
+      RETURNING id, name, title, amount, date, status, user_id, created_at;
+    `;
+    let result = await query(insertQuery, [cleanTitle, cleanTitle, numericAmount, cleanDate, status, userId]);
+
+    let createdRecord;
+    if (result && result.rows && result.rows.length > 0) {
+      createdRecord = {
+        ...result.rows[0],
+        amount: parseFloat(result.rows[0].amount),
+      };
+    } else {
+      createdRecord = {
+        id: Date.now(),
+        name: cleanTitle,
+        title: cleanTitle,
+        amount: numericAmount,
+        date: cleanDate,
+        status,
+        user_id: userId,
+        created_at: new Date().toISOString(),
+      };
+      inMemoryPayments.unshift(createdRecord);
+    }
+
+    return res.status(201).json({
+      success: true,
+      message: 'Payment recorded successfully',
+      data: createdRecord,
+      company: COMPANY_NAME,
+    });
+  } catch (error) {
+    console.error('POST /api/payments error:', error);
+    return res.status(500).json({ success: false, message: 'Error recording payment', error: error.message });
   }
 });
 
