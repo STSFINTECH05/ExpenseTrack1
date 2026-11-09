@@ -17,16 +17,30 @@ const inMemoryGoalWallets = [];
 const inMemorySegregation = [];
 const inMemoryBills = [];
 const inMemoryPayments = [];
+const inMemoryExpenses = [];
 
 const getUserId = (req) => {
   return (
     req.user?.id ||
+    req.user?.userId ||
     req.user?.user_id ||
     req.user?._id ||
     req.userId ||
+    req.user?.email ||
     req.session?.userId ||
     req.headers['x-user-id'] ||
     req.headers['x-auth-user-id'] ||
+    req.headers['x-user-email'] ||
+    null
+  );
+};
+
+const getUserEmail = (req) => {
+  return (
+    req.user?.email ||
+    req.userEmail ||
+    req.headers['x-user-email'] ||
+    (req.user?.id && String(req.user.id).includes('@') ? String(req.user.id) : null) ||
     null
   );
 };
@@ -213,7 +227,10 @@ const corsOptions = {
     'X-CSRF-Token',
     'X-Company-Name',
     'X-Service',
-    'Authorization'
+    'Authorization',
+    'x-user-id',
+    'x-user-email',
+    'x-auth-user-id'
   ],
 };
 
@@ -1438,6 +1455,211 @@ app.delete('/api/wallets/:id', async (req, res) => {
       error: error.message,
     });
   }
+});
+
+/**
+ * GET /api/goals
+ * Retrieve goal targets strictly scoped to authenticated user
+ */
+app.get('/api/goals', async (req, res) => {
+  try {
+    const userId = getUserId(req);
+    if (!userId) {
+      return res.status(401).json({ success: false, message: 'Authentication required' });
+    }
+
+    let result = { rows: [] };
+    try {
+      const selectQuery = `
+        SELECT id, name, target_amount, saved_amount, description, status, type, balance, user_id, created_at
+        FROM goal_wallets
+        WHERE user_id = $1
+        ORDER BY created_at DESC;
+      `;
+      result = await query(selectQuery, [userId]);
+    } catch (err) {
+      try {
+        result = await query(
+          `SELECT id, name, COALESCE(target_amount, balance, 0) AS target_amount, COALESCE(saved_amount, balance, 0) AS saved_amount, description, status, type, balance, user_id, created_at
+           FROM goal_targets
+           WHERE user_id = $1
+           ORDER BY created_at DESC;`,
+          [userId]
+        );
+      } catch (e) {}
+    }
+
+    const formattedRows = (result?.rows || []).map((row) => ({
+      ...row,
+      target_amount: parseFloat(row.target_amount) || parseFloat(row.balance) || 0,
+      saved_amount: parseFloat(row.saved_amount) || 0,
+    }));
+
+    return res.status(200).json({
+      success: true,
+      count: formattedRows.length,
+      data: formattedRows,
+      company: COMPANY_NAME,
+    });
+  } catch (err) {
+    console.error('GET /api/goals error:', err);
+    return res.status(500).json({ success: false, message: 'Error retrieving goals', error: err.message });
+  }
+});
+
+/**
+ * POST /api/goals
+ * Create a new goal target strictly scoped to user_id
+ */
+app.post('/api/goals', async (req, res) => {
+  req.url = '/api/wallets';
+  return app._router.handle(req, res);
+});
+
+/**
+ * PUT /api/goals/:id
+ * Update goal strictly scoped to user_id
+ */
+app.put('/api/goals/:id', async (req, res) => {
+  try {
+    const userId = getUserId(req);
+    if (!userId) {
+      return res.status(401).json({ success: false, message: 'Authentication required' });
+    }
+    const { id } = req.params;
+    const { name, target_amount, saved_amount, description, status } = req.body;
+    const updateParams = [
+      name ? name.trim() : null,
+      target_amount !== undefined ? parseFloat(target_amount) : null,
+      saved_amount !== undefined ? parseFloat(saved_amount) : null,
+      description !== undefined ? description.trim() : null,
+      status || null,
+      id,
+      userId,
+    ];
+    const updateQuery = `
+      UPDATE goal_wallets
+      SET name = COALESCE($1, name),
+          target_amount = COALESCE($2, target_amount),
+          saved_amount = COALESCE($3, saved_amount),
+          description = COALESCE($4, description),
+          status = COALESCE($5, status)
+      WHERE id = $6 AND user_id = $7
+      RETURNING *;
+    `;
+    let result = await query(updateQuery, updateParams);
+    if (!result.rows || result.rows.length === 0) {
+      try {
+        result = await query(
+          `UPDATE goal_targets
+           SET name = COALESCE($1, name),
+               target_amount = COALESCE($2, target_amount),
+               saved_amount = COALESCE($3, saved_amount),
+               description = COALESCE($4, description),
+               status = COALESCE($5, status)
+           WHERE id = $6 AND user_id = $7
+           RETURNING *;`,
+          updateParams
+        );
+      } catch (e) {}
+    }
+    if (!result.rows || result.rows.length === 0) {
+      return res.status(404).json({ success: false, message: 'Goal not found or unauthorized' });
+    }
+    return res.status(200).json({ success: true, data: result.rows[0] });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+/**
+ * DELETE /api/goals/:id
+ * Delete goal strictly scoped to user_id
+ */
+app.delete('/api/goals/:id', async (req, res) => {
+  req.url = `/api/wallets/${req.params.id}`;
+  return app._router.handle(req, res);
+});
+
+/**
+ * GET /api/expenses
+ * Retrieve expenses strictly scoped to authenticated user
+ */
+app.get('/api/expenses', async (req, res) => {
+  try {
+    const userId = getUserId(req);
+    if (!userId) {
+      return res.status(401).json({ success: false, message: 'Authentication required' });
+    }
+
+    let result = { rows: [] };
+    try {
+      const selectQuery = `
+        SELECT id, name, description, date, time, category, associated_wallet, amount, type, user_id, created_at
+        FROM expenses
+        WHERE user_id = $1
+        ORDER BY date DESC, created_at DESC;
+      `;
+      result = await query(selectQuery, [userId]);
+    } catch (err) {
+      // Fallback to segregation WHERE (type = 'additional_expense' OR type = 'fixed_expense') AND user_id = $1
+      try {
+        const fallbackQuery = `
+          SELECT id, type, name, description, date, time, schedule, category, associated_wallet, amount, user_id, created_at
+          FROM segregation
+          WHERE type IN ('additional_expense', 'fixed_expense') AND user_id = $1
+          ORDER BY date DESC, created_at DESC;
+        `;
+        result = await query(fallbackQuery, [userId]);
+      } catch (err2) {
+        return res.status(200).json({ success: true, count: 0, data: [] });
+      }
+    }
+
+    const rows = (result?.rows || []).map((row) => ({
+      ...row,
+      amount: parseFloat(row.amount) || 0,
+      date: row.date ? (typeof row.date === 'string' ? row.date.split('T')[0] : new Date(row.date).toISOString().split('T')[0]) : null,
+    }));
+
+    return res.status(200).json({
+      success: true,
+      count: rows.length,
+      data: rows,
+      company: COMPANY_NAME,
+    });
+  } catch (err) {
+    console.error('GET /api/expenses error:', err);
+    return res.status(500).json({ success: false, message: 'Error retrieving expenses', error: err.message });
+  }
+});
+
+/**
+ * POST /api/expenses
+ * Create a new expense strictly scoped to user_id
+ */
+app.post('/api/expenses', async (req, res) => {
+  req.body.type = req.body.type || 'additional_expense';
+  req.url = '/api/segregation';
+  return app._router.handle(req, res);
+});
+
+/**
+ * PUT /api/expenses/:id
+ * Update expense strictly scoped to user_id
+ */
+app.put('/api/expenses/:id', async (req, res) => {
+  req.url = `/api/segregation/${req.params.id}`;
+  return app._router.handle(req, res);
+});
+
+/**
+ * DELETE /api/expenses/:id
+ * Delete expense strictly scoped to user_id
+ */
+app.delete('/api/expenses/:id', async (req, res) => {
+  req.url = `/api/segregation/${req.params.id}`;
+  return app._router.handle(req, res);
 });
 
 /**
