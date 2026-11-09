@@ -253,27 +253,7 @@ app.use('/api', csrfProtection);
 // Authentication endpoints (/api/auth/login, /api/auth/register, /api/auth/csrf, /api/auth/me, /api/auth/logout)
 app.use('/api/auth', authRoutes);
 
-<<<<<<< HEAD
-// Optional session user resolver: populates req.user if session exists, without blocking unauthenticated calls
-app.use(async (req, res, next) => {
-  if (req.session?.userId) {
-    try {
-      const result = await pool.query(
-        'SELECT id, name, email, role FROM users WHERE id = $1 AND is_active = TRUE',
-        [req.session.userId]
-      );
-      if (result.rows.length > 0) {
-        req.user = result.rows[0];
-      }
-    } catch (e) {}
-  }
-  next();
-});
-
-/**
- * GET /health & GET /api/health
- * Operational status and company metadata
- */
+// Public Health Check
 app.get(['/health', '/api/health'], (req, res) => {
   res.status(200).json({
     status: 'healthy',
@@ -282,34 +262,6 @@ app.get(['/health', '/api/health'], (req, res) => {
     database: isDatabaseConfigured ? 'connected' : 'in-memory-fallback',
     timestamp: new Date().toISOString(),
     uptime: process.uptime(),
-  });
-});
-
-/**
- * GET /api/payments
- * Retrieve all payment transactions ordered by creation date descending
- */
-app.get('/api/payments', async (req, res) => {
-  try {
-    const selectQuery = `
-      SELECT id, COALESCE(title, name, '') AS title, COALESCE(name, title, '') AS name, amount, status, date, user_id, created_at
-      FROM payments
-      ORDER BY created_at DESC;
-    `;
-    const result = await query(selectQuery);
-
-    const rows = (result && result.rows) || [];
-    const formattedRows = rows.map((row) => ({
-      ...row,
-      amount: parseFloat(row.amount) || 0,
-=======
-// Public Health Check
-app.get('/api/health', (req, res) => {
-  res.json({
-    status: 'ok',
-    service: 'ExpenseTrack-API',
-    company: COMPANY_NAME,
-    timestamp: new Date().toISOString(),
   });
 });
 
@@ -374,25 +326,10 @@ app.get('/api/bills', async (req, res) => {
       amount: parseFloat(row.amount) || 0,
       date: row.date ? (typeof row.date === 'string' ? row.date.split('T')[0] : new Date(row.date).toISOString().split('T')[0]) : null,
       due_date: row.due_date ? (typeof row.due_date === 'string' ? row.due_date.split('T')[0] : new Date(row.due_date).toISOString().split('T')[0]) : null,
->>>>>>> 68a4c6f (data updates)
     }));
 
     return res.status(200).json({
       success: true,
-<<<<<<< HEAD
-      count: formattedRows.length,
-      data: formattedRows,
-      company: COMPANY_NAME,
-    });
-  } catch (err) {
-    console.error('Error fetching payments:', err.message);
-    return res.status(200).json({
-      success: true,
-      count: 0,
-      data: [],
-      company: COMPANY_NAME,
-    });
-=======
       count: rows.length,
       data: rows,
       company: COMPANY_NAME,
@@ -400,61 +337,10 @@ app.get('/api/bills', async (req, res) => {
   } catch (err) {
     console.error('GET /api/bills error:', err);
     return res.status(500).json({ success: false, message: 'Error retrieving bills', error: err.message });
->>>>>>> 68a4c6f (data updates)
   }
 });
 
 /**
-<<<<<<< HEAD
- * POST /api/payments
- * Validate and insert a new payment record
- */
-app.post('/api/payments', async (req, res) => {
-  try {
-    const { title, name, amount, status = 'completed' } = req.body;
-    const itemTitle = (title || name || '').trim();
-
-    if (!itemTitle) {
-      return res.status(400).json({
-        success: false,
-        message: 'Payment title is required and must be a non-empty string.',
-      });
-    }
-
-    const numericAmount = parseFloat(amount);
-    if (isNaN(numericAmount) || numericAmount <= 0) {
-      return res.status(400).json({
-        success: false,
-        message: 'Payment amount must be a positive number greater than 0.',
-      });
-    }
-
-    const insertQuery = `
-      INSERT INTO payments (title, name, amount, status)
-      VALUES ($1, $1, $2, $3)
-      RETURNING id, title, name, amount, status, created_at;
-    `;
-
-    const result = await query(insertQuery, [itemTitle, numericAmount, (status || 'completed').toLowerCase()]);
-    const createdPayment = {
-      ...result.rows[0],
-      amount: parseFloat(result.rows[0].amount),
-    };
-
-    return res.status(201).json({
-      success: true,
-      message: 'Payment recorded successfully',
-      data: createdPayment,
-      company: COMPANY_NAME,
-    });
-  } catch (error) {
-    console.error('Error creating payment:', error);
-    return res.status(500).json({
-      success: false,
-      message: 'Internal server error while creating payment',
-      error: error.message,
-    });
-=======
  * POST /api/bills
  * Add a new bill with automatic user_id assignment
  */
@@ -728,7 +614,6 @@ app.delete('/api/bills/:id', async (req, res) => {
   } catch (err) {
     console.error('DELETE /api/bills/:id error:', err);
     return res.status(500).json({ success: false, message: 'Internal server error while deleting bill', error: err.message });
->>>>>>> 68a4c6f (data updates)
   }
 });
 
@@ -758,11 +643,7 @@ app.get('/api/segregation', async (req, res) => {
            ORDER BY date DESC, created_at DESC;`;
       result = await query(selectQuery, type ? [type, userId] : [userId]);
     } catch (err) {
-<<<<<<< HEAD
-      console.error('Error querying segregation table:', err.message);
-=======
       console.error('Error querying segregation:', err.message);
->>>>>>> 68a4c6f (data updates)
       // Fallback to finance_records if segregation table query failed
       try {
         const selectQuery = type
@@ -776,45 +657,12 @@ app.get('/api/segregation', async (req, res) => {
              ORDER BY date DESC, created_at DESC;`;
         result = await query(selectQuery, type ? [type, userId] : [userId]);
       } catch (err2) {
-<<<<<<< HEAD
-        console.error('Error querying finance_records fallback:', err2.message);
-        return res.status(200).json({
-          success: true,
-          count: 0,
-          data: [],
-          company: COMPANY_NAME,
-        });
-=======
         console.error('Fallback finance_records error:', err2.message);
         return res.status(200).json({ success: true, count: 0, data: [] });
->>>>>>> 68a4c6f (data updates)
       }
     }
 
     if (!result || !result.rows || result.rows.length === 0) {
-<<<<<<< HEAD
-      // If segregation table was empty, check if finance_records has rows
-      try {
-        const fallbackQuery = type
-          ? `SELECT id, type, name, description, date, time, schedule, category, associated_wallet, wallet_id, amount, user_id, created_at
-             FROM finance_records
-             WHERE type = $1
-             ORDER BY date DESC, created_at DESC;`
-          : `SELECT id, type, name, description, date, time, schedule, category, associated_wallet, wallet_id, amount, user_id, created_at
-             FROM finance_records
-             ORDER BY date DESC, created_at DESC;`;
-        const fbResult = await query(fallbackQuery, type ? [type] : []);
-        if (fbResult && fbResult.rows && fbResult.rows.length > 0) {
-          result = fbResult;
-        }
-      } catch (e) {
-        console.error('Error in fallbackQuery:', e.message);
-      }
-    }
-
-    const rows = (result && result.rows) || [];
-    const formattedRows = rows.map((row) => ({
-=======
       // If type === 'bill' and segregation is empty, check bills table
       if (type === 'bill') {
         try {
@@ -833,7 +681,6 @@ app.get('/api/segregation', async (req, res) => {
     }
 
     const formattedRows = (result?.rows || []).map((row) => ({
->>>>>>> 68a4c6f (data updates)
       ...row,
       amount: parseFloat(row.amount) || 0,
       date: row.date
@@ -853,18 +700,8 @@ app.get('/api/segregation', async (req, res) => {
       company: COMPANY_NAME,
     });
   } catch (err) {
-<<<<<<< HEAD
-    console.error('Unhandled segregation fetch error:', err.message);
-    return res.status(200).json({
-      success: true,
-      count: 0,
-      data: [],
-      company: COMPANY_NAME,
-    });
-=======
-    console.error('GET /api/segregation error:', err.message);
+    console.error('GET /api/segregation error:', err);
     return res.status(200).json({ success: true, count: 0, data: [] });
->>>>>>> 68a4c6f (data updates)
   }
 });
 
