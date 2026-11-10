@@ -9,6 +9,8 @@ const { sessionMiddleware } = require('./config/session');
 const { csrfProtection } = require('./middleware/csrf');
 const authenticate = require('./middleware/authenticate');
 const authRoutes = require('./routes/auth.routes');
+const splitsRoutes = require('./routes/splits.routes');
+const aiRoutes = require('./routes/ai.routes');
 
 const isDatabaseConfigured = Boolean(process.env.DATABASE_URL);
 
@@ -110,8 +112,13 @@ const isOriginAllowed = (origin) => {
   if (allowedOrigins.includes(origin)) return true;
   // Allow all STS Fintech Vercel preview/production domains
   if (/^https:\/\/.*\.vercel\.app$/.test(origin)) return true;
-  // In development, allow any localhost or 127.0.0.1 port
-  if (!isProduction && /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) return true;
+  // In development, allow any localhost, 127.0.0.1, or local LAN/private IP port (192.168.x.x, 10.x.x.x, 172.16-31.x.x)
+  if (
+    !isProduction &&
+    /^https?:\/\/(localhost|127\.0\.0\.1|192\.168\.\d+\.\d+|10\.\d+\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+)(:\d+)?$/.test(origin)
+  ) {
+    return true;
+  }
   return false;
 };
 
@@ -171,51 +178,51 @@ app.use('/api', csrfProtection);
 // Authentication endpoints (/api/auth/login, /api/auth/register, /api/auth/csrf, /api/auth/me, /api/auth/logout)
 app.use('/api/auth', authRoutes);
 
-// Optional session user resolver: populates req.user if session exists, without blocking unauthenticated calls
-app.use(async (req, res, next) => {
-  if (req.session?.userId) {
-    try {
-      const result = await pool.query(
-        'SELECT id, name, email, role FROM users WHERE id = $1 AND is_active = TRUE',
-        [req.session.userId]
-      );
-      if (result.rows.length > 0) {
-        req.user = result.rows[0];
-      }
-    } catch (e) {}
-  }
-  next();
-});
+// Split & Collect persistent group APIs
+app.use('/api/splits', splitsRoutes);
+
+// Financial Intelligence & Analytics APIs
+app.use('/api/ai', aiRoutes);
 
 /**
  * GET /health & GET /api/health
- * Operational status and company metadata
+ * Operational status and company metadata (Publicly accessible)
  */
 app.get(['/health', '/api/health'], (req, res) => {
   res.status(200).json({
     status: 'healthy',
     company: COMPANY_NAME,
     service: 'ExpenseTrack Backend API',
-    database: isDatabaseConfigured ? 'connected' : 'in-memory-fallback',
+    database: isDatabaseConfigured ? 'connected' : 'offline',
     timestamp: new Date().toISOString(),
     uptime: process.uptime(),
   });
 });
 
 /**
- * GET /api/payments
- * Retrieve all payment transactions ordered by creation date descending
+ * =========================================================================
+ * PROTECTED FINANCIAL APIs
+ * All routes below require valid server-side session authentication.
+ * All queries are strictly scoped to req.user.id (INTEGER).
+ * =========================================================================
  */
-app.get('/api/payments', async (req, res) => {
+
+/**
+ * GET /api/payments
+ * Retrieve payment transactions for the authenticated user
+ */
+app.get('/api/payments', authenticate, async (req, res) => {
   try {
+    const userId = req.user.id;
     const selectQuery = `
       SELECT id, COALESCE(title, name, '') AS title, COALESCE(name, title, '') AS name, amount, status, date, user_id, created_at
       FROM payments
+      WHERE user_id = $1
       ORDER BY created_at DESC;
     `;
-    const result = await query(selectQuery);
+    const result = await pool.query(selectQuery, [userId]);
 
-    const rows = (result && result.rows) || [];
+    const rows = result.rows || [];
     const formattedRows = rows.map((row) => ({
       ...row,
       amount: parseFloat(row.amount) || 0,
@@ -229,21 +236,21 @@ app.get('/api/payments', async (req, res) => {
     });
   } catch (err) {
     console.error('Error fetching payments:', err.message);
-    return res.status(200).json({
-      success: true,
-      count: 0,
-      data: [],
-      company: COMPANY_NAME,
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to retrieve payments',
+      error: err.message,
     });
   }
 });
 
 /**
  * POST /api/payments
- * Validate and insert a new payment record
+ * Validate and insert a new payment record assigned to the authenticated user
  */
-app.post('/api/payments', async (req, res) => {
+app.post('/api/payments', authenticate, async (req, res) => {
   try {
+    const userId = req.user.id;
     const { title, name, amount, status = 'completed' } = req.body;
     const itemTitle = (title || name || '').trim();
 
@@ -263,12 +270,18 @@ app.post('/api/payments', async (req, res) => {
     }
 
     const insertQuery = `
-      INSERT INTO payments (title, name, amount, status)
-      VALUES ($1, $1, $2, $3)
-      RETURNING id, title, name, amount, status, created_at;
+      INSERT INTO payments (title, name, amount, status, user_id)
+      VALUES ($1, $1, $2, $3, $4)
+      RETURNING id, title, name, amount, status, user_id, created_at;
     `;
 
-    const result = await query(insertQuery, [itemTitle, numericAmount, (status || 'completed').toLowerCase()]);
+    const result = await pool.query(insertQuery, [
+      itemTitle,
+      numericAmount,
+      (status || 'completed').toLowerCase(),
+      userId,
+    ]);
+
     const createdPayment = {
       ...result.rows[0],
       amount: parseFloat(result.rows[0].amount),
@@ -291,70 +304,45 @@ app.post('/api/payments', async (req, res) => {
 });
 
 /**
- * GET /api/segregation
- * Retrieve finance segregation records, with optional ?type= filter
- * (e.g., 'additional_income', 'additional_expense', 'fixed_income', 'fixed_expense', 'bill')
+ * GET /api/segregation & GET /api/finance-records
+ * Retrieve finance segregation records for the authenticated user
  */
-app.get('/api/segregation', async (req, res) => {
+app.get(['/api/segregation', '/api/finance-records'], authenticate, async (req, res) => {
   try {
+    const userId = req.user.id;
     const { type } = req.query;
-    let result = { rows: [] };
 
-    try {
-      const selectQuery = type
+    const selectSegregation = type
+      ? `SELECT id, type, name, description, date, time, schedule, category, associated_wallet, wallet_id, amount, user_id, created_at
+         FROM segregation
+         WHERE user_id = $1 AND type = $2
+         ORDER BY date DESC, created_at DESC;`
+      : `SELECT id, type, name, description, date, time, schedule, category, associated_wallet, wallet_id, amount, user_id, created_at
+         FROM segregation
+         WHERE user_id = $1
+         ORDER BY date DESC, created_at DESC;`;
+
+    const params = type ? [userId, type] : [userId];
+    let result = await pool.query(selectSegregation, params);
+
+    // If segregation table has no records for this user, check finance_records scoped to user
+    if (!result.rows || result.rows.length === 0) {
+      const selectFinance = type
         ? `SELECT id, type, name, description, date, time, schedule, category, associated_wallet, wallet_id, amount, user_id, created_at
-           FROM segregation
-           WHERE type = $1
+           FROM finance_records
+           WHERE user_id = $1 AND type = $2
            ORDER BY date DESC, created_at DESC;`
         : `SELECT id, type, name, description, date, time, schedule, category, associated_wallet, wallet_id, amount, user_id, created_at
-           FROM segregation
+           FROM finance_records
+           WHERE user_id = $1
            ORDER BY date DESC, created_at DESC;`;
-      result = await query(selectQuery, type ? [type] : []);
-    } catch (err) {
-      console.error('Error querying segregation table:', err.message);
-      // Fallback to finance_records if segregation table query failed
-      try {
-        const selectQuery = type
-          ? `SELECT id, type, name, description, date, time, schedule, category, associated_wallet, wallet_id, amount, user_id, created_at
-             FROM finance_records
-             WHERE type = $1
-             ORDER BY date DESC, created_at DESC;`
-          : `SELECT id, type, name, description, date, time, schedule, category, associated_wallet, wallet_id, amount, user_id, created_at
-             FROM finance_records
-             ORDER BY date DESC, created_at DESC;`;
-        result = await query(selectQuery, type ? [type] : []);
-      } catch (err2) {
-        console.error('Error querying finance_records fallback:', err2.message);
-        return res.status(200).json({
-          success: true,
-          count: 0,
-          data: [],
-          company: COMPANY_NAME,
-        });
+      const finResult = await pool.query(selectFinance, params);
+      if (finResult.rows && finResult.rows.length > 0) {
+        result = finResult;
       }
     }
 
-    if (!result || !result.rows || result.rows.length === 0) {
-      // If segregation table was empty, check if finance_records has rows
-      try {
-        const fallbackQuery = type
-          ? `SELECT id, type, name, description, date, time, schedule, category, associated_wallet, wallet_id, amount, user_id, created_at
-             FROM finance_records
-             WHERE type = $1
-             ORDER BY date DESC, created_at DESC;`
-          : `SELECT id, type, name, description, date, time, schedule, category, associated_wallet, wallet_id, amount, user_id, created_at
-             FROM finance_records
-             ORDER BY date DESC, created_at DESC;`;
-        const fbResult = await query(fallbackQuery, type ? [type] : []);
-        if (fbResult && fbResult.rows && fbResult.rows.length > 0) {
-          result = fbResult;
-        }
-      } catch (e) {
-        console.error('Error in fallbackQuery:', e.message);
-      }
-    }
-
-    const rows = (result && result.rows) || [];
+    const rows = result.rows || [];
     const formattedRows = rows.map((row) => ({
       ...row,
       amount: parseFloat(row.amount) || 0,
@@ -365,7 +353,6 @@ app.get('/api/segregation', async (req, res) => {
         : null,
     }));
 
-    // Filter duplicates by unique id or name before sending response
     const uniqueRows = Array.from(new Map(formattedRows.map((item) => [item.id || item.name, item])).values());
 
     return res.status(200).json({
@@ -376,21 +363,21 @@ app.get('/api/segregation', async (req, res) => {
     });
   } catch (err) {
     console.error('Unhandled segregation fetch error:', err.message);
-    return res.status(200).json({
-      success: true,
-      count: 0,
-      data: [],
-      company: COMPANY_NAME,
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to retrieve finance records',
+      error: err.message,
     });
   }
 });
 
 /**
- * POST /api/segregation
- * Validate and persist new finance records submitted from UI modal
+ * POST /api/segregation & POST /api/finance-records
+ * Create a new finance segregation record for the authenticated user
  */
-app.post('/api/segregation', async (req, res) => {
+app.post(['/api/segregation', '/api/finance-records'], authenticate, async (req, res) => {
   try {
+    const userId = req.user.id;
     const {
       type,
       name,
@@ -430,7 +417,6 @@ app.post('/api/segregation', async (req, res) => {
     const cleanDate = date || new Date().toISOString().split('T')[0];
     const cleanTime = time || new Date().toTimeString().slice(0, 5);
 
-    let result;
     const insertParams = [
       type,
       name.trim(),
@@ -441,35 +427,29 @@ app.post('/api/segregation', async (req, res) => {
       category,
       associated_wallet,
       numericAmount,
+      userId,
     ];
 
-    try {
-      const insertSegregationQuery = `
-        INSERT INTO segregation (type, name, description, date, time, schedule, category, associated_wallet, amount)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-        RETURNING id, type, name, description, date, time, schedule, category, associated_wallet, amount, created_at;
-      `;
-      result = await query(insertSegregationQuery, insertParams);
-    } catch (e) {}
+    const insertSegregationQuery = `
+      INSERT INTO segregation (type, name, description, date, time, schedule, category, associated_wallet, amount, user_id)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      RETURNING id, type, name, description, date, time, schedule, category, associated_wallet, amount, user_id, created_at;
+    `;
+    const result = await pool.query(insertSegregationQuery, insertParams);
 
+    // Dual-write to finance_records for consistency
     try {
       const insertFinanceQuery = `
-        INSERT INTO finance_records (type, name, description, date, time, schedule, category, associated_wallet, amount)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-        RETURNING id, type, name, description, date, time, schedule, category, associated_wallet, amount, created_at;
+        INSERT INTO finance_records (type, name, description, date, time, schedule, category, associated_wallet, amount, user_id)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10);
       `;
-      const resFinance = await query(insertFinanceQuery, insertParams);
-      if (!result || !result.rows || result.rows.length === 0) {
-        result = resFinance;
-      }
+      await pool.query(insertFinanceQuery, insertParams);
     } catch (e) {}
 
     const createdRecord = {
       ...result.rows[0],
       amount: parseFloat(result.rows[0].amount),
     };
-
-    console.log(`[STS FINTECH] Segregation record created: ${createdRecord.type} - "${createdRecord.name}" (₹${createdRecord.amount})`);
 
     return res.status(201).json({
       success: true,
@@ -488,12 +468,22 @@ app.post('/api/segregation', async (req, res) => {
 });
 
 /**
- * PUT /api/segregation/:id
- * Update an existing finance record
+ * PUT /api/segregation/:id & PUT /api/finance-records/:id
+ * Update an existing finance record owned by the authenticated user
  */
-app.put('/api/segregation/:id', async (req, res) => {
+app.put(['/api/segregation/:id', '/api/finance-records/:id'], authenticate, async (req, res) => {
   try {
+    const userId = req.user.id;
     const { id } = req.params;
+    const recordId = parseInt(id, 10);
+
+    if (isNaN(recordId)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid record ID.',
+      });
+    }
+
     const {
       name,
       description = '',
@@ -532,47 +522,55 @@ app.put('/api/segregation/:id', async (req, res) => {
       category,
       associated_wallet,
       numericAmount,
-      parseInt(id, 10),
+      recordId,
+      userId,
     ];
 
-    let result;
-    try {
-      const updateSegQuery = `
-        UPDATE segregation
-        SET name = $1, description = $2, date = $3, time = $4, schedule = $5, category = $6, associated_wallet = $7, amount = $8
-        WHERE id = $9
-        RETURNING id, type, name, description, date, time, schedule, category, associated_wallet, amount, created_at;
-      `;
-      result = await query(updateSegQuery, updateParams);
-    } catch (e) {}
+    const updateSegQuery = `
+      UPDATE segregation
+      SET name = $1, description = $2, date = $3, time = $4, schedule = $5, category = $6, associated_wallet = $7, amount = $8
+      WHERE id = $9 AND user_id = $10
+      RETURNING id, type, name, description, date, time, schedule, category, associated_wallet, amount, user_id, created_at;
+    `;
+    let result = await pool.query(updateSegQuery, updateParams);
 
-    try {
-      const updateFinanceQuery = `
+    // Also update finance_records if segregation was not matched
+    if (!result.rows || result.rows.length === 0) {
+      const updateFinQuery = `
         UPDATE finance_records
         SET name = $1, description = $2, date = $3, time = $4, schedule = $5, category = $6, associated_wallet = $7, amount = $8
-        WHERE id = $9
-        RETURNING id, type, name, description, date, time, schedule, category, associated_wallet, amount, created_at;
+        WHERE id = $9 AND user_id = $10
+        RETURNING id, type, name, description, date, time, schedule, category, associated_wallet, amount, user_id, created_at;
       `;
-      const resFin = await query(updateFinanceQuery, updateParams);
-      if (!result || !result.rows || result.rows.length === 0) {
-        result = resFin;
-      }
-    } catch (e) {}
+      result = await pool.query(updateFinQuery, updateParams);
+    } else {
+      // Dual-sync update to finance_records
+      try {
+        const updateFinQuery = `
+          UPDATE finance_records
+          SET name = $1, description = $2, date = $3, time = $4, schedule = $5, category = $6, associated_wallet = $7, amount = $8
+          WHERE id = $9 AND user_id = $10;
+        `;
+        await pool.query(updateFinQuery, updateParams);
+      } catch (e) {}
+    }
 
-    if (!result || !result.rows || result.rows.length === 0) {
+    if (!result.rows || result.rows.length === 0) {
       return res.status(404).json({
         success: false,
-        message: 'Record not found',
+        message: 'Finance record not found.',
       });
     }
 
     const updatedRecord = {
       ...result.rows[0],
       amount: parseFloat(result.rows[0].amount),
-      date: result.rows[0].date ? (typeof result.rows[0].date === 'string' ? result.rows[0].date.split('T')[0] : new Date(result.rows[0].date).toISOString().split('T')[0]) : null,
+      date: result.rows[0].date
+        ? typeof result.rows[0].date === 'string'
+          ? result.rows[0].date.split('T')[0]
+          : new Date(result.rows[0].date).toISOString().split('T')[0]
+        : null,
     };
-
-    console.log(`[STS FINTECH] Segregation record updated: ID ${id} - "${updatedRecord.name}" (₹${updatedRecord.amount})`);
 
     return res.status(200).json({
       success: true,
@@ -591,31 +589,36 @@ app.put('/api/segregation/:id', async (req, res) => {
 });
 
 /**
- * DELETE /api/segregation/:id
- * Remove a finance record
+ * DELETE /api/segregation/:id & DELETE /api/finance-records/:id
+ * Delete a finance record owned by the authenticated user
  */
-app.delete('/api/segregation/:id', async (req, res) => {
+app.delete(['/api/segregation/:id', '/api/finance-records/:id'], authenticate, async (req, res) => {
   try {
+    const userId = req.user.id;
     const { id } = req.params;
-    try {
-      await query(`DELETE FROM segregation WHERE id = $1;`, [parseInt(id, 10)]);
-    } catch (e) {}
-    const deleteQuery = `DELETE FROM finance_records WHERE id = $1 RETURNING id;`;
-    const result = await query(deleteQuery, [parseInt(id, 10)]);
+    const recordId = parseInt(id, 10);
 
-    if (!result.rows || result.rows.length === 0) {
-      return res.status(404).json({
+    if (isNaN(recordId)) {
+      return res.status(400).json({
         success: false,
-        message: 'Record not found',
+        message: 'Invalid record ID.',
       });
     }
 
-    console.log(`[STS FINTECH] Segregation record deleted: ID ${id}`);
+    const delSeg = await pool.query('DELETE FROM segregation WHERE id = $1 AND user_id = $2 RETURNING id;', [recordId, userId]);
+    const delFin = await pool.query('DELETE FROM finance_records WHERE id = $1 AND user_id = $2 RETURNING id;', [recordId, userId]);
+
+    if ((!delSeg.rows || delSeg.rows.length === 0) && (!delFin.rows || delFin.rows.length === 0)) {
+      return res.status(404).json({
+        success: false,
+        message: 'Finance record not found.',
+      });
+    }
 
     return res.status(200).json({
       success: true,
       message: 'Finance record deleted successfully',
-      id: parseInt(id, 10),
+      id: recordId,
       company: COMPANY_NAME,
     });
   } catch (error) {
@@ -629,57 +632,35 @@ app.delete('/api/segregation/:id', async (req, res) => {
 });
 
 /**
- * GET /api/wallets
- * Retrieve all segregated goal wallets
+ * GET /api/wallets & GET /api/goal-wallets
+ * Retrieve all segregated goal wallets for the authenticated user
  */
-app.get('/api/wallets', async (req, res) => {
+app.get(['/api/wallets', '/api/goal-wallets'], authenticate, async (req, res) => {
   try {
-    let result = { rows: [] };
+    const userId = req.user.id;
+    const selectQuery = `
+      SELECT id, name, target_amount, saved_amount, description, status, type, balance, user_id, created_at
+      FROM goal_wallets
+      WHERE user_id = $1
+      ORDER BY created_at DESC;
+    `;
+    let result = await pool.query(selectQuery, [userId]);
 
-    try {
-      const selectQuery = `
-        SELECT id, name, target_amount, saved_amount, description, status, type, balance, user_id, created_at
-        FROM goal_wallets
+    if (!result.rows || result.rows.length === 0) {
+      const fallbackQuery = `
+        SELECT id, name, COALESCE(target_amount, balance, 0) AS target_amount, COALESCE(saved_amount, balance, 0) AS saved_amount, description, status, type, balance, user_id, created_at
+        FROM wallets
+        WHERE user_id = $1
         ORDER BY created_at DESC;
       `;
-      result = await query(selectQuery);
-    } catch (err) {
-      console.error(err.message);
-      try {
-        const fallbackQuery = `
-          SELECT id, name, COALESCE(target_amount, balance, 0) AS target_amount, COALESCE(saved_amount, balance, 0) AS saved_amount, description, status, type, balance, user_id, created_at
-          FROM wallets
-          ORDER BY created_at DESC;
-        `;
-        result = await query(fallbackQuery);
-      } catch (err2) {
-        console.error(err2.message);
-        return res.status(200).json([]);
+      const fbResult = await pool.query(fallbackQuery, [userId]);
+      if (fbResult.rows && fbResult.rows.length > 0) {
+        result = fbResult;
       }
     }
 
-    if (!result || !result.rows || result.rows.length === 0) {
-      // Check wallets table if goal_wallets was empty
-      try {
-        const fallbackQuery = `
-          SELECT id, name, COALESCE(target_amount, balance, 0) AS target_amount, COALESCE(saved_amount, balance, 0) AS saved_amount, description, status, type, balance, user_id, created_at
-          FROM wallets
-          ORDER BY created_at DESC;
-        `;
-        const fbResult = await query(fallbackQuery);
-        if (fbResult && fbResult.rows && fbResult.rows.length > 0) {
-          result = fbResult;
-        }
-      } catch (e) {
-        console.error(e.message);
-      }
-    }
-
-    if (!result || !result.rows || result.rows.length === 0) {
-      return res.status(200).json([]);
-    }
-
-    const formattedRows = result.rows.map((row) => ({
+    const rows = result.rows || [];
+    const formattedRows = rows.map((row) => ({
       ...row,
       target_amount: parseFloat(row.target_amount) || parseFloat(row.balance) || 0,
       saved_amount: parseFloat(row.saved_amount) || 0,
@@ -692,18 +673,23 @@ app.get('/api/wallets', async (req, res) => {
       company: COMPANY_NAME,
     });
   } catch (err) {
-    console.error(err.message);
-    return res.status(200).json([]);
+    console.error('Error fetching wallets:', err.message);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to retrieve wallets',
+      error: err.message,
+    });
   }
 });
 
 /**
- * POST /api/wallets
- * Setup a new purpose target wallet
+ * POST /api/wallets & POST /api/goal-wallets
+ * Setup a new purpose target wallet assigned to the authenticated user
  */
-app.post('/api/wallets', async (req, res) => {
+app.post(['/api/wallets', '/api/goal-wallets'], authenticate, async (req, res) => {
   try {
-    // 1. Purpose / Item name extraction & validation (supports name, purpose, purposeName, itemName, title)
+    const userId = req.user.id;
+
     const rawName =
       req.body.name ??
       req.body.purpose ??
@@ -721,7 +707,6 @@ app.post('/api/wallets', async (req, res) => {
       });
     }
 
-    // 2. Target cap amount extraction & numeric parsing (supports target_amount, targetAmount, target_cap, targetCap, amount)
     const rawTarget =
       req.body.target_amount ??
       req.body.targetAmount ??
@@ -737,157 +722,33 @@ app.post('/api/wallets', async (req, res) => {
       });
     }
 
-    // 3. Description / notes extraction (supports description, notes, descriptiveNotes)
     const rawDescription = req.body.description ?? req.body.notes ?? req.body.descriptiveNotes ?? '';
     const cleanDescription = typeof rawDescription === 'string' ? rawDescription.trim() : String(rawDescription || '').trim();
 
-    // 4. Type / category extraction (supports type, category)
     const rawType = req.body.type ?? req.body.category ?? 'goal';
     const cleanType = typeof rawType === 'string' && rawType.trim().length > 0 ? rawType.trim() : 'goal';
 
-    // 5. User authentication context parsing (req.user.id, user_id, headers, or body)
-    const userId =
-      req.user?.id ||
-      req.user?.user_id ||
-      req.user?._id ||
-      req.userId ||
-      req.user_id ||
-      req.headers['x-user-id'] ||
-      req.body?.user_id ||
-      req.body?.userId ||
-      null;
+    const insertFullQuery = `
+      INSERT INTO goal_wallets (name, target_amount, saved_amount, description, status, type, balance, user_id)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      RETURNING id, name, target_amount, saved_amount, description, status, type, balance, user_id, created_at;
+    `;
+    const result = await pool.query(insertFullQuery, [
+      cleanName,
+      numericTarget,
+      0.0,
+      cleanDescription,
+      'in_progress',
+      cleanType,
+      0.0,
+      userId,
+    ]);
 
-    let createdWallet = null;
-
-    // 6. Attempt PostgreSQL database insertion if database is configured
-    if (isDatabaseConfigured && pool) {
-      try {
-        const insertFullQuery = `
-          INSERT INTO goal_wallets (name, target_amount, saved_amount, description, status, type, balance, user_id)
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-          RETURNING id, name, target_amount, saved_amount, description, status, type, balance, user_id, created_at;
-        `;
-        const result = await pool.query(insertFullQuery, [
-          cleanName,
-          numericTarget,
-          0.0,
-          cleanDescription,
-          'in_progress',
-          cleanType,
-          0.0,
-          userId,
-        ]);
-
-        if (result.rows && result.rows.length > 0) {
-          createdWallet = {
-            ...result.rows[0],
-            target_amount: parseFloat(result.rows[0].target_amount) || numericTarget,
-            saved_amount: parseFloat(result.rows[0].saved_amount) || 0,
-          };
-        }
-      } catch (dbErr) {
-        console.error('[STS FINTECH] Error inserting into goal_wallets table:', dbErr.message || dbErr);
-        if (dbErr.detail) console.error('[STS FINTECH] DB Detail:', dbErr.detail);
-        if (dbErr.code) console.error('[STS FINTECH] DB Error Code:', dbErr.code);
-
-        // Fallback: If column user_id / type doesn't exist on older table schema, try standard columns
-        if (dbErr.code === '42703') {
-          try {
-            const insertBaseQuery = `
-              INSERT INTO goal_wallets (name, target_amount, saved_amount, description, status)
-              VALUES ($1, $2, $3, $4, $5)
-              RETURNING id, name, target_amount, saved_amount, description, status, created_at;
-            `;
-            const baseResult = await pool.query(insertBaseQuery, [
-              cleanName,
-              numericTarget,
-              0.0,
-              cleanDescription,
-              'in_progress',
-            ]);
-            if (baseResult.rows && baseResult.rows.length > 0) {
-              createdWallet = {
-                ...baseResult.rows[0],
-                target_amount: parseFloat(baseResult.rows[0].target_amount) || numericTarget,
-                saved_amount: parseFloat(baseResult.rows[0].saved_amount) || 0,
-                type: cleanType,
-                user_id: userId,
-              };
-            }
-          } catch (baseErr) {
-            console.error('[STS FINTECH] Fallback insert into goal_wallets failed:', baseErr.message || baseErr);
-          }
-        }
-
-        // Fallback: If goal_wallets table does not exist, try wallets table
-        if (!createdWallet && (dbErr.code === '42P01' || dbErr.message?.includes('does not exist'))) {
-          try {
-            const insertWalletsQuery = `
-              INSERT INTO wallets (name, type, balance, target_amount, saved_amount, description, status, user_id)
-              VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-              RETURNING id, name, target_amount, saved_amount, description, status, type, balance, user_id, created_at;
-            `;
-            const wResult = await pool.query(insertWalletsQuery, [
-              cleanName,
-              cleanType,
-              0.0,
-              numericTarget,
-              0.0,
-              cleanDescription,
-              'in_progress',
-              userId,
-            ]);
-            if (wResult.rows && wResult.rows.length > 0) {
-              createdWallet = {
-                ...wResult.rows[0],
-                target_amount: parseFloat(wResult.rows[0].target_amount) || numericTarget,
-                saved_amount: parseFloat(wResult.rows[0].saved_amount) || 0,
-              };
-            }
-          } catch (wErr) {
-            console.error('[STS FINTECH] Fallback insert into wallets failed:', wErr.message || wErr);
-          }
-        }
-
-        const isConnErr =
-          dbErr.code === 'ECONNREFUSED' ||
-          dbErr.code === 'ENOTFOUND' ||
-          (dbErr.errors && dbErr.errors.some((e) => e.code === 'ECONNREFUSED')) ||
-          dbErr.message?.includes('ECONNREFUSED');
-
-        // If it's a real SQL constraint/syntax error and not a connection failure, rethrow to trigger 500 logging
-        if (!createdWallet && !isConnErr) {
-          throw dbErr;
-        }
-      }
-    }
-
-    // 7. In-memory fallback if database is not configured or connection is unavailable
-    if (!createdWallet) {
-      const nextId =
-        inMemoryGoalWallets.length > 0
-          ? Math.max(...inMemoryGoalWallets.map((w) => Number(w.id) || 0)) + 1
-          : 1;
-
-      createdWallet = {
-        id: nextId,
-        name: cleanName,
-        target_amount: numericTarget,
-        saved_amount: 0.0,
-        balance: 0.0,
-        description: cleanDescription,
-        status: 'in_progress',
-        type: cleanType,
-        user_id: userId,
-        created_at: new Date().toISOString(),
-      };
-      inMemoryGoalWallets.unshift(createdWallet);
-      console.log(`[STS FINTECH] Goal wallet created (in-memory mode): "${createdWallet.name}" (Target: ₹${createdWallet.target_amount})`);
-    } else {
-      // Sync into memory store
-      inMemoryGoalWallets.unshift(createdWallet);
-      console.log(`[STS FINTECH] Goal wallet created (database mode): "${createdWallet.name}" (Target: ₹${createdWallet.target_amount})`);
-    }
+    const createdWallet = {
+      ...result.rows[0],
+      target_amount: parseFloat(result.rows[0].target_amount) || numericTarget,
+      saved_amount: parseFloat(result.rows[0].saved_amount) || 0,
+    };
 
     return res.status(201).json({
       success: true,
@@ -896,36 +757,33 @@ app.post('/api/wallets', async (req, res) => {
       company: COMPANY_NAME,
     });
   } catch (error) {
-    console.error('[STS FINTECH] Detailed Error in POST /api/wallets:', error);
-    if (error.stack) console.error('[STS FINTECH] Error Stack:', error.stack);
-    if (error.detail) console.error('[STS FINTECH] SQL Error Detail:', error.detail);
-    if (error.hint) console.error('[STS FINTECH] SQL Error Hint:', error.hint);
-    if (error.code) console.error('[STS FINTECH] SQL Error Code:', error.code);
-
-    const errorMessage =
-      error.message ||
-      (error.errors && error.errors.map((e) => e.message).join('; ')) ||
-      error.code ||
-      'Failed to create goal wallet';
-
+    console.error('Error creating wallet:', error);
     return res.status(500).json({
       success: false,
       message: 'Failed to create goal wallet',
-      error: errorMessage,
-      detail: error.detail || undefined,
+      error: error.message,
     });
   }
 });
 
 /**
- * POST /api/wallets/:id/add-cash
- * Allocate cash towards a goal wallet
+ * POST /api/wallets/:id/add-cash & POST /api/goal-wallets/:id/add-cash
+ * Allocate cash towards an owned goal wallet
  */
-app.post('/api/wallets/:id/add-cash', async (req, res) => {
+app.post(['/api/wallets/:id/add-cash', '/api/goal-wallets/:id/add-cash'], authenticate, async (req, res) => {
   try {
+    const userId = req.user.id;
     const { id } = req.params;
-    const { amount } = req.body;
+    const walletId = parseInt(id, 10);
 
+    if (isNaN(walletId)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid wallet ID.',
+      });
+    }
+
+    const { amount } = req.body;
     const numericAmount = parseFloat(amount);
     if (isNaN(numericAmount) || numericAmount <= 0) {
       return res.status(400).json({
@@ -934,18 +792,23 @@ app.post('/api/wallets/:id/add-cash', async (req, res) => {
       });
     }
 
-    // Check existing wallet and remaining ceiling limit
+    // Verify wallet ownership
     const checkQuery = `
       SELECT id, name, target_amount, saved_amount, status
       FROM goal_wallets
-      WHERE id = $1;
+      WHERE id = $1 AND user_id = $2;
     `;
-    const checkResult = await query(checkQuery, [id]);
+    let checkResult = await pool.query(checkQuery, [walletId, userId]);
+
     if (!checkResult.rows || checkResult.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: 'Wallet container not found',
-      });
+      const checkWallets = `SELECT id, name, COALESCE(target_amount, balance, 0) AS target_amount, saved_amount, status FROM wallets WHERE id = $1 AND user_id = $2;`;
+      checkResult = await pool.query(checkWallets, [walletId, userId]);
+      if (!checkResult.rows || checkResult.rows.length === 0) {
+        return res.status(404).json({
+          success: false,
+          message: 'Wallet container not found.',
+        });
+      }
     }
 
     const currentWallet = checkResult.rows[0];
@@ -964,16 +827,26 @@ app.post('/api/wallets/:id/add-cash', async (req, res) => {
       UPDATE goal_wallets
       SET saved_amount = saved_amount + $1,
           status = CASE WHEN (saved_amount + $1) >= target_amount THEN 'target_met' ELSE status END
-      WHERE id = $2
-      RETURNING id, name, target_amount, saved_amount, description, status, created_at;
+      WHERE id = $2 AND user_id = $3
+      RETURNING id, name, target_amount, saved_amount, description, status, user_id, created_at;
     `;
+    let result = await pool.query(updateQuery, [numericAmount, walletId, userId]);
 
-    const result = await query(updateQuery, [numericAmount, id]);
+    if (!result.rows || result.rows.length === 0) {
+      const updateWalletsQuery = `
+        UPDATE wallets
+        SET saved_amount = saved_amount + $1,
+            status = CASE WHEN (saved_amount + $1) >= target_amount THEN 'target_met' ELSE status END
+        WHERE id = $2 AND user_id = $3
+        RETURNING id, name, target_amount, saved_amount, description, status, user_id, created_at;
+      `;
+      result = await pool.query(updateWalletsQuery, [numericAmount, walletId, userId]);
+    }
 
     if (!result.rows || result.rows.length === 0) {
       return res.status(404).json({
         success: false,
-        message: 'Wallet container not found',
+        message: 'Wallet container not found.',
       });
     }
 
@@ -999,22 +872,354 @@ app.post('/api/wallets/:id/add-cash', async (req, res) => {
 });
 
 /**
- * DELETE /api/wallets/:id
- * Remove a goal wallet
+ * DELETE /api/wallets/:id & DELETE /api/goal-wallets/:id
+ * Remove an owned goal wallet
  */
-app.delete('/api/wallets/:id', async (req, res) => {
+app.delete(['/api/wallets/:id', '/api/goal-wallets/:id'], authenticate, async (req, res) => {
   try {
+    const userId = req.user.id;
     const { id } = req.params;
-    const deleteQuery = `DELETE FROM goal_wallets WHERE id = $1;`;
-    await query(deleteQuery, [id]);
+    const walletId = parseInt(id, 10);
+
+    if (isNaN(walletId)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid wallet ID.',
+      });
+    }
+
+    const delGoal = await pool.query('DELETE FROM goal_wallets WHERE id = $1 AND user_id = $2 RETURNING id;', [walletId, userId]);
+    const delWal = await pool.query('DELETE FROM wallets WHERE id = $1 AND user_id = $2 RETURNING id;', [walletId, userId]);
+
+    if ((!delGoal.rows || delGoal.rows.length === 0) && (!delWal.rows || delWal.rows.length === 0)) {
+      return res.status(404).json({
+        success: false,
+        message: 'Wallet container not found.',
+      });
+    }
+
     return res.status(200).json({
       success: true,
       message: 'Wallet deleted successfully',
+      id: walletId,
     });
   } catch (error) {
     return res.status(500).json({
       success: false,
+      message: 'Failed to delete wallet',
       error: error.message,
+    });
+  }
+});
+
+/**
+ * GET /api/transactions
+ * Retrieve transactions for the authenticated user
+ */
+app.get('/api/transactions', authenticate, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const result = await pool.query(
+      `SELECT t.id, t.user_id, t.account_id, t.category_id, t.transaction_type, t.amount, t.description, t.transaction_date, t.created_at,
+              c.name AS category_name, a.account_name
+       FROM transactions t
+       LEFT JOIN categories c ON t.category_id = c.id AND c.user_id = $1
+       LEFT JOIN accounts a ON t.account_id = a.id AND a.user_id = $1
+       WHERE t.user_id = $1
+       ORDER BY t.transaction_date DESC, t.created_at DESC;`,
+      [userId]
+    );
+
+    const formatted = (result.rows || []).map(r => ({
+      ...r,
+      amount: parseFloat(r.amount) || 0,
+    }));
+
+    return res.status(200).json({
+      success: true,
+      count: formatted.length,
+      data: formatted,
+    });
+  } catch (err) {
+    console.error('Error fetching transactions:', err.message);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to retrieve transactions',
+      error: err.message,
+    });
+  }
+});
+
+/**
+ * POST /api/transactions
+ * Create a new transaction for the authenticated user
+ */
+app.post('/api/transactions', authenticate, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { account_id, category_id, transaction_type = 'expense', amount, description, transaction_date } = req.body;
+
+    const numericAmount = parseFloat(amount);
+    if (isNaN(numericAmount) || numericAmount <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Amount must be a positive number greater than 0.',
+      });
+    }
+
+    const cleanDate = transaction_date || new Date().toISOString().split('T')[0];
+
+    const result = await pool.query(
+      `INSERT INTO transactions (user_id, account_id, category_id, transaction_type, amount, description, transaction_date)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING id, user_id, account_id, category_id, transaction_type, amount, description, transaction_date, created_at;`,
+      [userId, account_id || null, category_id || null, transaction_type, numericAmount, description || '', cleanDate]
+    );
+
+    return res.status(201).json({
+      success: true,
+      message: 'Transaction recorded successfully',
+      data: {
+        ...result.rows[0],
+        amount: parseFloat(result.rows[0].amount),
+      },
+    });
+  } catch (err) {
+    console.error('Error creating transaction:', err.message);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to create transaction',
+      error: err.message,
+    });
+  }
+});
+
+/**
+ * PUT /api/transactions/:id
+ * Update an existing transaction owned by the authenticated user
+ */
+app.put('/api/transactions/:id', authenticate, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const txId = parseInt(req.params.id, 10);
+    if (isNaN(txId)) {
+      return res.status(400).json({ success: false, message: 'Invalid transaction ID.' });
+    }
+
+    const { amount, description, transaction_type } = req.body;
+    const numericAmount = parseFloat(amount);
+
+    const result = await pool.query(
+      `UPDATE transactions
+       SET amount = COALESCE($1, amount),
+           description = COALESCE($2, description),
+           transaction_type = COALESCE($3, transaction_type)
+       WHERE id = $4 AND user_id = $5
+       RETURNING id, user_id, account_id, category_id, transaction_type, amount, description, transaction_date, created_at;`,
+      [isNaN(numericAmount) ? null : numericAmount, description ?? null, transaction_type ?? null, txId, userId]
+    );
+
+    if (!result.rows || result.rows.length === 0) {
+      return res.status(404).json({ success: false, message: 'Transaction not found.' });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: 'Transaction updated successfully',
+      data: {
+        ...result.rows[0],
+        amount: parseFloat(result.rows[0].amount),
+      },
+    });
+  } catch (err) {
+    console.error('Error updating transaction:', err.message);
+    return res.status(500).json({ success: false, message: 'Failed to update transaction', error: err.message });
+  }
+});
+
+/**
+ * DELETE /api/transactions/:id
+ * Delete an existing transaction owned by the authenticated user
+ */
+app.delete('/api/transactions/:id', authenticate, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const txId = parseInt(req.params.id, 10);
+    if (isNaN(txId)) {
+      return res.status(400).json({ success: false, message: 'Invalid transaction ID.' });
+    }
+
+    const result = await pool.query(
+      `DELETE FROM transactions WHERE id = $1 AND user_id = $2 RETURNING id;`,
+      [txId, userId]
+    );
+
+    if (!result.rows || result.rows.length === 0) {
+      return res.status(404).json({ success: false, message: 'Transaction not found.' });
+    }
+
+    return res.status(200).json({ success: true, message: 'Transaction deleted successfully', id: txId });
+  } catch (err) {
+    console.error('Error deleting transaction:', err.message);
+    return res.status(500).json({ success: false, message: 'Failed to delete transaction', error: err.message });
+  }
+});
+
+/**
+ * GET /api/categories
+ * Retrieve categories for the authenticated user
+ */
+app.get('/api/categories', authenticate, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const result = await pool.query(
+      `SELECT id, user_id, name, category_type, created_at
+       FROM categories
+       WHERE user_id = $1
+       ORDER BY name ASC;`,
+      [userId]
+    );
+
+    return res.status(200).json({
+      success: true,
+      count: result.rows.length,
+      data: result.rows,
+    });
+  } catch (err) {
+    console.error('Error fetching categories:', err.message);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to retrieve categories',
+      error: err.message,
+    });
+  }
+});
+
+/**
+ * POST /api/categories
+ * Create a new category for the authenticated user
+ */
+app.post('/api/categories', authenticate, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { name, category_type = 'expense' } = req.body;
+
+    if (!name || typeof name !== 'string' || name.trim().length === 0) {
+      return res.status(400).json({ success: false, message: 'Category name is required.' });
+    }
+
+    const result = await pool.query(
+      `INSERT INTO categories (user_id, name, category_type)
+       VALUES ($1, $2, $3)
+       RETURNING id, user_id, name, category_type, created_at;`,
+      [userId, name.trim(), category_type]
+    );
+
+    return res.status(201).json({
+      success: true,
+      message: 'Category created successfully',
+      data: result.rows[0],
+    });
+  } catch (err) {
+    console.error('Error creating category:', err.message);
+    return res.status(500).json({ success: false, message: 'Failed to create category', error: err.message });
+  }
+});
+
+/**
+ * GET /api/accounts
+ * Retrieve accounts for the authenticated user
+ */
+app.get('/api/accounts', authenticate, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const result = await pool.query('SELECT * FROM accounts WHERE user_id = $1 ORDER BY id ASC;', [userId]);
+    return res.status(200).json({ success: true, count: result.rows.length, data: result.rows });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: 'Failed to retrieve accounts', error: err.message });
+  }
+});
+
+/**
+ * GET /api/budgets
+ * Retrieve budgets for the authenticated user
+ */
+app.get('/api/budgets', authenticate, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const result = await pool.query('SELECT * FROM budgets WHERE user_id = $1 ORDER BY id ASC;', [userId]);
+    return res.status(200).json({ success: true, count: result.rows.length, data: result.rows });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: 'Failed to retrieve budgets', error: err.message });
+  }
+});
+
+/**
+ * GET /api/dashboard/summary & GET /api/summary
+ * Multi-user isolated financial summary for dashboard
+ */
+app.get(['/api/dashboard/summary', '/api/summary'], authenticate, async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    // Total income from segregation
+    const incomeRes = await pool.query(
+      `SELECT COALESCE(SUM(amount), 0) AS total_income
+       FROM segregation
+       WHERE user_id = $1 AND type IN ('additional_income', 'fixed_income');`,
+      [userId]
+    );
+
+    // Total expense from segregation
+    const expenseRes = await pool.query(
+      `SELECT COALESCE(SUM(amount), 0) AS total_expense
+       FROM segregation
+       WHERE user_id = $1 AND type IN ('additional_expense', 'fixed_expense', 'bill');`,
+      [userId]
+    );
+
+    // Total saved in goal wallets
+    const walletsRes = await pool.query(
+      `SELECT COALESCE(SUM(saved_amount), 0) AS total_saved,
+              COALESCE(SUM(target_amount), 0) AS total_target
+       FROM goal_wallets
+       WHERE user_id = $1;`,
+      [userId]
+    );
+
+    // Total payments
+    const paymentsRes = await pool.query(
+      `SELECT COALESCE(SUM(amount), 0) AS total_payments
+       FROM payments
+       WHERE user_id = $1;`,
+      [userId]
+    );
+
+    const totalIncome = parseFloat(incomeRes.rows[0].total_income) || 0;
+    const totalExpense = parseFloat(expenseRes.rows[0].total_expense) || 0;
+    const totalSaved = parseFloat(walletsRes.rows[0].total_saved) || 0;
+    const totalTarget = parseFloat(walletsRes.rows[0].total_target) || 0;
+    const totalPayments = parseFloat(paymentsRes.rows[0].total_payments) || 0;
+    const netBalance = totalIncome - totalExpense;
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        totalIncome,
+        totalExpense,
+        netBalance,
+        totalSaved,
+        totalTarget,
+        totalPayments,
+      },
+      company: COMPANY_NAME,
+    });
+  } catch (err) {
+    console.error('Error fetching dashboard summary:', err.message);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to retrieve dashboard summary',
+      error: err.message,
     });
   }
 });
@@ -1078,6 +1283,24 @@ async function startServer() {
     await pool.initDatabase();
 
     console.log('[STS FINTECH] Database initialization successful.');
+
+    // Validate Local AI configuration (Step 4.1 - Non-blocking diagnostic)
+    try {
+      const { checkAiHealth, getConfig } = require('./services/aiProvider.service');
+      const aiConfig = getConfig();
+      console.log(`[STS FINTECH AI] Provider configured: '${aiConfig.provider}' (Model: '${aiConfig.model}')`);
+      const aiHealth = await checkAiHealth();
+      if (aiHealth.available) {
+        console.log(`✅ [STS FINTECH AI] Provider '${aiConfig.provider}' verified with model '${aiConfig.model}'.`);
+      } else {
+        console.warn(`⚠️ [STS FINTECH AI] Provider diagnostic: ${aiHealth.message}`);
+        if (aiHealth.instructions) {
+          console.warn(`   Setup instructions: ${aiHealth.instructions}`);
+        }
+      }
+    } catch (aiErr) {
+      console.warn('[STS FINTECH AI] Startup AI validation warning:', aiErr.message);
+    }
 
     const server = app.listen(PORT, () => {
       console.log('========================================================');
