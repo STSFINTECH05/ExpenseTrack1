@@ -277,7 +277,6 @@ app.use('/api', csrfProtection);
 // Authentication endpoints (/api/auth/login, /api/auth/register, /api/auth/csrf, /api/auth/me, /api/auth/logout)
 app.use('/api/auth', authRoutes);
 
-<<<<<<< HEAD
 // Split & Collect persistent group APIs
 app.use('/api/splits', splitsRoutes);
 
@@ -288,9 +287,6 @@ app.use('/api/ai', aiRoutes);
  * GET /health & GET /api/health
  * Operational status and company metadata (Publicly accessible)
  */
-=======
-// Public Health Check
->>>>>>> 05e1eb0e99dc5cb24da27162ad325b8805b5018b
 app.get(['/health', '/api/health'], (req, res) => {
   res.status(200).json({
     status: 'healthy',
