@@ -56,19 +56,22 @@ function saveSession(req) {
 }
 
 // Obtain CSRF token
-router.get('/csrf', async (req, res, next) => {
-  try {
-    req.session.csrfToken ||= createCsrfToken();
-    await saveSession(req);
+router.get('/csrf', (req, res) => {
+  if (!req.session.csrfToken) {
+    req.session.csrfToken = createCsrfToken();
+  }
 
-    res.json({
+  req.session.save((err) => {
+    if (err) {
+      console.error('[AUTH] Failed to save session during CSRF fetch:', err);
+      return res.status(500).json({ success: false, error: 'SESSION_SAVE_ERROR' });
+    }
+
+    return res.status(200).json({
       success: true,
       csrfToken: req.session.csrfToken,
     });
-  } catch (err) {
-    next(err);
-  }
-});
+  });
 });
 
 // Register a standard finance member
