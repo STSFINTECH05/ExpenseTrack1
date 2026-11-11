@@ -1,27 +1,10 @@
 const express = require('express');
 const argon2 = require('argon2');
-const jwt = require('jsonwebtoken');
 const { rateLimit } = require('express-rate-limit');
 const { z } = require('zod');
 const pool = require('../db');
 const authenticate = require('../middleware/authenticate');
 const { createCsrfToken } = require('../middleware/csrf');
-
-const JWT_SECRET = process.env.JWT_SECRET || process.env.SESSION_SECRET || 'sts-fintech-jwt-super-secret-key-2025';
-
-function generateToken(user) {
-  return jwt.sign(
-    {
-      id: user.id || user.email,
-      userId: user.id || user.email,
-      email: user.email,
-      name: user.name,
-      role: user.role || 'finance_member',
-    },
-    JWT_SECRET,
-    { expiresIn: '30d' }
-  );
-}
 
 const router = express.Router();
 
@@ -122,13 +105,10 @@ router.post('/register', registerLimiter, async (req, res, next) => {
 
     await saveSession(req);
 
-    const token = generateToken(user);
-
     return res.status(201).json({
       success: true,
       message: 'Account created successfully.',
       user,
-      token,
       csrfToken: req.session.csrfToken,
     });
   } catch (error) {
@@ -157,20 +137,13 @@ router.post('/login', loginLimiter, async (req, res, next) => {
 
     const email = parsed.data.email.toLowerCase();
 
-    let user = null;
-    try {
-      const result = await pool.query(
-        `SELECT id, name, email, password_hash, role, is_active
-         FROM users
-         WHERE email = $1`,
-        [email]
-      );
-      user = result.rows[0];
-    } catch (dbErr) {
-      console.warn('DB query in /login failed, utilizing fallback for active session:', dbErr.message);
-    }
+    const result = await pool.query(
+      `SELECT id, name, email, password_hash, role, is_active
+       FROM users
+       WHERE email = $1`,
+      [email]
+    );
 
-<<<<<<< HEAD
     const user = result.rows[0];
 
     if (!user || !user.is_active) {
@@ -193,37 +166,18 @@ router.post('/login', loginLimiter, async (req, res, next) => {
     }
 
     if (!isPasswordValid) {
-=======
-    if (!user && !process.env.DATABASE_URL) {
-      // Offline fallback login for development
-      user = {
-        id: email,
-        name: email.split('@')[0],
-        email: email,
-        role: 'finance_member',
-      };
-    } else if (
-      !user ||
-      !user.is_active ||
-      (user.password_hash && !(await argon2.verify(user.password_hash, parsed.data.password)))
-    ) {
->>>>>>> 05e1eb0e99dc5cb24da27162ad325b8805b5018b
       return res.status(401).json({
         success: false,
         message: 'Invalid email or password.',
       });
     }
 
-    if (req.session) {
-      try {
-        await regenerateSession(req);
-        req.session.userId = user.id;
-        req.session.csrfToken = createCsrfToken();
-        await saveSession(req);
-      } catch (e) {}
-    }
+    await regenerateSession(req);
 
-    const token = generateToken(user);
+    req.session.userId = user.id;
+    req.session.csrfToken = createCsrfToken();
+
+    await saveSession(req);
 
     return res.json({
       success: true,
@@ -234,35 +188,11 @@ router.post('/login', loginLimiter, async (req, res, next) => {
         email: user.email,
         role: user.role,
       },
-      token,
-      csrfToken: req.session?.csrfToken,
+      csrfToken: req.session.csrfToken,
     });
   } catch (error) {
     next(error);
   }
-});
-
-// Quick token exchange endpoint for authenticated/demo sessions
-router.post('/token', (req, res) => {
-  const { email, name } = req.body || {};
-  if (!email || typeof email !== 'string' || !email.includes('@')) {
-    return res.status(400).json({ success: false, message: 'Valid email required' });
-  }
-  const cleanEmail = email.trim().toLowerCase();
-  const userName = name || cleanEmail.split('@')[0];
-  const userPayload = {
-    id: cleanEmail,
-    userId: cleanEmail,
-    email: cleanEmail,
-    name: userName,
-    role: 'finance_member',
-  };
-  const token = generateToken(userPayload);
-  return res.json({
-    success: true,
-    token,
-    user: userPayload,
-  });
 });
 
 // Current authenticated user

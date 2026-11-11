@@ -14,38 +14,8 @@ const aiRoutes = require('./routes/ai.routes');
 
 const isDatabaseConfigured = Boolean(process.env.DATABASE_URL);
 
-// In-memory data stores for memory-backed operation when DATABASE_URL is not provided or offline
+// In-memory goal wallets store for memory-backed operation when DATABASE_URL is not provided or offline
 const inMemoryGoalWallets = [];
-const inMemorySegregation = [];
-const inMemoryBills = [];
-const inMemoryPayments = [];
-const inMemoryExpenses = [];
-
-const getUserId = (req) => {
-  return (
-    req.user?.id ||
-    req.user?.userId ||
-    req.user?.user_id ||
-    req.user?._id ||
-    req.userId ||
-    req.user?.email ||
-    req.session?.userId ||
-    req.headers['x-user-id'] ||
-    req.headers['x-auth-user-id'] ||
-    req.headers['x-user-email'] ||
-    null
-  );
-};
-
-const getUserEmail = (req) => {
-  return (
-    req.user?.email ||
-    req.userEmail ||
-    req.headers['x-user-email'] ||
-    (req.user?.id && String(req.user.id).includes('@') ? String(req.user.id) : null) ||
-    null
-  );
-};
 
 const query = async (text, params = []) => {
   if (isDatabaseConfigured && pool) {
@@ -58,61 +28,26 @@ const query = async (text, params = []) => {
         (err.errors && err.errors.some((e) => e.code === 'ECONNREFUSED')) ||
         err.message?.includes('ECONNREFUSED');
       if (!isConnErr) throw err;
-      console.warn('[STS FINTECH] Database connection unavailable; utilizing in-memory store.');
+      console.warn('[STS FINTECH] Database connection unavailable; utilizing in-memory wallet store.');
     }
   }
 
-  // Handle in-memory query simulation with user scoping when database is offline
+  // Handle in-memory query simulation for wallets when database is unavailable or not configured
   const sql = (typeof text === 'string' ? text : text?.text || '').toLowerCase();
 
-  // DELETE
-  if (sql.includes('delete from goal_wallets') || sql.includes('delete from wallets') || sql.includes('delete from goal_targets')) {
+  // Check DELETE first
+  if (sql.includes('delete from goal_wallets') || sql.includes('delete from wallets')) {
     const id = params[0];
-    const userId = params[1];
-    const idx = inMemoryGoalWallets.findIndex(
-      (w) => String(w.id) === String(id) && (!userId || String(w.user_id) === String(userId))
-    );
-    if (idx !== -1) {
-      const removed = inMemoryGoalWallets.splice(idx, 1);
-      return { rows: removed };
-    }
-    return { rows: [] };
+    const idx = inMemoryGoalWallets.findIndex((w) => String(w.id) === String(id));
+    if (idx !== -1) inMemoryGoalWallets.splice(idx, 1);
+    return { rows: [{ id }] };
   }
 
-  if (sql.includes('delete from bills')) {
-    const id = params[0];
-    const userId = params[1];
-    const idx = inMemoryBills.findIndex(
-      (b) => String(b.id) === String(id) && (!userId || String(b.user_id) === String(userId))
-    );
-    if (idx !== -1) {
-      const removed = inMemoryBills.splice(idx, 1);
-      return { rows: removed };
-    }
-    return { rows: [] };
-  }
-
-  if (sql.includes('delete from segregation') || sql.includes('delete from finance_records') || sql.includes('delete from expenses')) {
-    const id = params[0];
-    const userId = params[1];
-    const idx = inMemorySegregation.findIndex(
-      (s) => String(s.id) === String(id) && (!userId || String(s.user_id) === String(userId))
-    );
-    if (idx !== -1) {
-      const removed = inMemorySegregation.splice(idx, 1);
-      return { rows: removed };
-    }
-    return { rows: [] };
-  }
-
-  // UPDATE
+  // Check UPDATE second
   if (sql.includes('update goal_wallets') || sql.includes('update wallets')) {
     const amount = parseFloat(params[0]) || 0;
     const id = params[1];
-    const userId = params[2];
-    const item = inMemoryGoalWallets.find(
-      (w) => String(w.id) === String(id) && (!userId || String(w.user_id) === String(userId))
-    );
+    const item = inMemoryGoalWallets.find((w) => String(w.id) === String(id));
     if (item) {
       item.saved_amount = (parseFloat(item.saved_amount) || 0) + amount;
       if (item.saved_amount >= item.target_amount) {
@@ -123,45 +58,14 @@ const query = async (text, params = []) => {
     return { rows: [] };
   }
 
-  // SELECT
-  if (sql.includes('from goal_wallets') || sql.includes('from wallets') || sql.includes('from goal_targets')) {
+  // Check SELECT third
+  if (sql.includes('from goal_wallets') || sql.includes('from wallets')) {
     if (sql.includes('where id =')) {
       const id = params[0];
-      const userId = params[1];
-      const found = inMemoryGoalWallets.find(
-        (w) => String(w.id) === String(id) && (!userId || String(w.user_id) === String(userId))
-      );
+      const found = inMemoryGoalWallets.find((w) => String(w.id) === String(id));
       return { rows: found ? [found] : [] };
     }
-    const userId = params[0];
-    const list = userId ? inMemoryGoalWallets.filter((w) => String(w.user_id) === String(userId)) : [];
-    return { rows: [...list] };
-  }
-
-  if (sql.includes('from bills')) {
-    const userId = params[0];
-    const list = userId ? inMemoryBills.filter((b) => String(b.user_id) === String(userId)) : [];
-    return { rows: [...list] };
-  }
-
-  if (sql.includes('from segregation') || sql.includes('from finance_records') || sql.includes('from expenses')) {
-    if (params.length === 2) {
-      const type = params[0];
-      const userId = params[1];
-      const list = inMemorySegregation.filter(
-        (s) => s.type === type && (!userId || String(s.user_id) === String(userId))
-      );
-      return { rows: [...list] };
-    }
-    const userId = params[0];
-    const list = userId ? inMemorySegregation.filter((s) => String(s.user_id) === String(userId)) : [];
-    return { rows: [...list] };
-  }
-
-  if (sql.includes('from payments')) {
-    const userId = params[0];
-    const list = userId ? inMemoryPayments.filter((p) => String(p.user_id) === String(userId)) : [];
-    return { rows: [...list] };
+    return { rows: [...inMemoryGoalWallets] };
   }
 
   return { rows: [] };
@@ -236,7 +140,9 @@ const corsOptions = {
     'X-Service',
     'Authorization',
     'x-user-id',
+    'X-User-Id',
     'x-user-email',
+    'X-User-Email',
     'x-auth-user-id'
   ],
 };
@@ -298,7 +204,6 @@ app.get(['/health', '/api/health'], (req, res) => {
   });
 });
 
-<<<<<<< HEAD
 /**
  * =========================================================================
  * PROTECTED FINANCIAL APIs
@@ -324,94 +229,27 @@ app.get('/api/payments', authenticate, async (req, res) => {
 
     const rows = result.rows || [];
     const formattedRows = rows.map((row) => ({
-=======
-// Protect all remaining API endpoints
-app.use('/api', authenticate);
-
-/**
- * GET /api/bills
- * Retrieve scheduled bills strictly scoped to authenticated user
- */
-app.get('/api/bills', async (req, res) => {
-  try {
-    const userId = getUserId(req);
-    if (!userId) {
-      return res.status(401).json({ success: false, message: 'Authentication required' });
-    }
-
-    let result = { rows: [] };
-    try {
-      const selectQuery = `
-        SELECT id, name, description, date, COALESCE(due_date, date) AS due_date, time, schedule, category, associated_wallet, amount, status, user_id, created_at
-        FROM bills
-        WHERE user_id = $1
-        ORDER BY date DESC, created_at DESC;
-      `;
-      result = await query(selectQuery, [userId]);
-    } catch (err) {
-      console.error('Error querying bills table:', err.message);
-      // Fallback to segregation WHERE type = 'bill' AND user_id = $1
-      try {
-        const fallbackQuery = `
-          SELECT id, type, name, description, date, time, schedule, category, associated_wallet, amount, user_id, created_at
-          FROM segregation
-          WHERE type = 'bill' AND user_id = $1
-          ORDER BY date DESC, created_at DESC;
-        `;
-        result = await query(fallbackQuery, [userId]);
-      } catch (err2) {
-        console.error('Fallback query error:', err2.message);
-        return res.status(200).json({ success: true, count: 0, data: [] });
-      }
-    }
-
-    if (!result || !result.rows || result.rows.length === 0) {
-      // Check segregation table if bills table was empty
-      try {
-        const fallbackQuery = `
-          SELECT id, type, name, description, date, time, schedule, category, associated_wallet, amount, user_id, created_at
-          FROM segregation
-          WHERE type = 'bill' AND user_id = $1
-          ORDER BY date DESC, created_at DESC;
-        `;
-        const fbResult = await query(fallbackQuery, [userId]);
-        if (fbResult && fbResult.rows && fbResult.rows.length > 0) {
-          result = fbResult;
-        }
-      } catch (e) {}
-    }
-
-    const rows = (result?.rows || []).map((row) => ({
->>>>>>> 05e1eb0e99dc5cb24da27162ad325b8805b5018b
       ...row,
       amount: parseFloat(row.amount) || 0,
-      date: row.date ? (typeof row.date === 'string' ? row.date.split('T')[0] : new Date(row.date).toISOString().split('T')[0]) : null,
-      due_date: row.due_date ? (typeof row.due_date === 'string' ? row.due_date.split('T')[0] : new Date(row.due_date).toISOString().split('T')[0]) : null,
     }));
 
     return res.status(200).json({
       success: true,
-      count: rows.length,
-      data: rows,
+      count: formattedRows.length,
+      data: formattedRows,
       company: COMPANY_NAME,
     });
   } catch (err) {
-<<<<<<< HEAD
     console.error('Error fetching payments:', err.message);
     return res.status(500).json({
       success: false,
       message: 'Failed to retrieve payments',
       error: err.message,
     });
-=======
-    console.error('GET /api/bills error:', err);
-    return res.status(500).json({ success: false, message: 'Error retrieving bills', error: err.message });
->>>>>>> 05e1eb0e99dc5cb24da27162ad325b8805b5018b
   }
 });
 
 /**
-<<<<<<< HEAD
  * POST /api/payments
  * Validate and insert a new payment record assigned to the authenticated user
  */
@@ -420,40 +258,22 @@ app.post('/api/payments', authenticate, async (req, res) => {
     const userId = req.user.id;
     const { title, name, amount, status = 'completed' } = req.body;
     const itemTitle = (title || name || '').trim();
-=======
- * POST /api/bills
- * Add a new bill with automatic user_id assignment
- */
-app.post('/api/bills', async (req, res) => {
-  try {
-    const userId = getUserId(req);
-    if (!userId) {
-      return res.status(401).json({ success: false, message: 'Authentication required' });
-    }
->>>>>>> 05e1eb0e99dc5cb24da27162ad325b8805b5018b
 
-    const {
-      name,
-      description = '',
-      date,
-      due_date,
-      time,
-      schedule = 'Monthly (1st)',
-      category = 'Utilities',
-      associated_wallet = 'Primary Wallet',
-      amount = 0,
-    } = req.body;
-
-    if (!name || typeof name !== 'string' || name.trim().length === 0) {
-      return res.status(400).json({ success: false, message: 'Bill name is required.' });
+    if (!itemTitle) {
+      return res.status(400).json({
+        success: false,
+        message: 'Payment title is required and must be a non-empty string.',
+      });
     }
 
     const numericAmount = parseFloat(amount);
-    if (isNaN(numericAmount) || numericAmount < 0) {
-      return res.status(400).json({ success: false, message: 'Amount must be a valid positive number or 0.' });
+    if (isNaN(numericAmount) || numericAmount <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Payment amount must be a positive number greater than 0.',
+      });
     }
 
-<<<<<<< HEAD
     const insertQuery = `
       INSERT INTO payments (title, name, amount, status, user_id)
       VALUES ($1, $1, $2, $3, $4)
@@ -471,273 +291,30 @@ app.post('/api/bills', async (req, res) => {
       ...result.rows[0],
       amount: parseFloat(result.rows[0].amount),
     };
-=======
-    const cleanDate = date || due_date || new Date().toISOString().split('T')[0];
-    const cleanDueDate = due_date || cleanDate;
-    const cleanTime = time || new Date().toTimeString().slice(0, 5);
-
-    let createdRecord = null;
-    const insertParams = [
-      name.trim(),
-      description.trim(),
-      cleanDate,
-      cleanDueDate,
-      cleanTime,
-      schedule,
-      category,
-      associated_wallet,
-      numericAmount,
-      userId,
-    ];
-
-    try {
-      const insertQuery = `
-        INSERT INTO bills (name, description, date, due_date, time, schedule, category, associated_wallet, amount, user_id)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-        RETURNING *;
-      `;
-      const result = await query(insertQuery, insertParams);
-      if (result && result.rows && result.rows.length > 0) {
-        createdRecord = {
-          ...result.rows[0],
-          amount: parseFloat(result.rows[0].amount),
-        };
-      }
-    } catch (dbErr) {
-      console.error('Error inserting into bills table:', dbErr.message);
-    }
-
-    // Sync into segregation table with type = 'bill' and user_id
-    try {
-      const syncQuery = `
-        INSERT INTO segregation (type, name, description, date, time, schedule, category, associated_wallet, amount, user_id)
-        VALUES ('bill', $1, $2, $3, $4, $5, $6, $7, $8, $9)
-        RETURNING id, type, name, description, date, time, schedule, category, associated_wallet, amount, user_id, created_at;
-      `;
-      const segResult = await query(syncQuery, [
-        name.trim(),
-        description.trim(),
-        cleanDate,
-        cleanTime,
-        schedule,
-        category,
-        associated_wallet,
-        numericAmount,
-        userId,
-      ]);
-      if (!createdRecord && segResult && segResult.rows && segResult.rows.length > 0) {
-        createdRecord = {
-          ...segResult.rows[0],
-          amount: parseFloat(segResult.rows[0].amount),
-        };
-      }
-    } catch (syncErr) {
-      console.error('Error syncing bill to segregation:', syncErr.message);
-    }
-
-    if (!createdRecord) {
-      createdRecord = {
-        id: Date.now(),
-        name: name.trim(),
-        description: description.trim(),
-        date: cleanDate,
-        due_date: cleanDueDate,
-        time: cleanTime,
-        schedule,
-        category,
-        associated_wallet,
-        amount: numericAmount,
-        user_id: userId,
-        created_at: new Date().toISOString(),
-      };
-      inMemoryBills.unshift(createdRecord);
-    }
->>>>>>> 05e1eb0e99dc5cb24da27162ad325b8805b5018b
 
     return res.status(201).json({
       success: true,
-      message: 'Bill created successfully',
-      data: createdRecord,
+      message: 'Payment recorded successfully',
+      data: createdPayment,
       company: COMPANY_NAME,
     });
-  } catch (err) {
-    console.error('POST /api/bills error:', err);
-    return res.status(500).json({ success: false, message: 'Internal server error while creating bill', error: err.message });
+  } catch (error) {
+    console.error('Error creating payment:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Internal server error while creating payment',
+      error: error.message,
+    });
   }
 });
 
 /**
- * PUT /api/bills/:id
- * Update an existing bill strictly scoped by user_id
- */
-app.put('/api/bills/:id', async (req, res) => {
-  try {
-    const userId = getUserId(req);
-    if (!userId) {
-      return res.status(401).json({ success: false, message: 'Authentication required' });
-    }
-
-    const { id } = req.params;
-    const {
-      name,
-      description = '',
-      date,
-      due_date,
-      time,
-      schedule = 'Monthly (1st)',
-      category = 'Utilities',
-      associated_wallet = 'Primary Wallet',
-      amount = 0,
-    } = req.body;
-
-    if (!name || typeof name !== 'string' || name.trim().length === 0) {
-      return res.status(400).json({ success: false, message: 'Bill name is required.' });
-    }
-
-    const numericAmount = parseFloat(amount);
-    if (isNaN(numericAmount) || numericAmount < 0) {
-      return res.status(400).json({ success: false, message: 'Amount must be a valid positive number.' });
-    }
-
-    const cleanDate = date || due_date || new Date().toISOString().split('T')[0];
-    const cleanDueDate = due_date || cleanDate;
-    const cleanTime = time || new Date().toTimeString().slice(0, 5);
-
-    let updatedRecord = null;
-    try {
-      const updateQuery = `
-        UPDATE bills
-        SET name = $1, description = $2, date = $3, due_date = $4, time = $5, schedule = $6, category = $7, associated_wallet = $8, amount = $9
-        WHERE id = $10 AND user_id = $11
-        RETURNING *;
-      `;
-      const result = await query(updateQuery, [
-        name.trim(),
-        description.trim(),
-        cleanDate,
-        cleanDueDate,
-        cleanTime,
-        schedule,
-        category,
-        associated_wallet,
-        numericAmount,
-        parseInt(id, 10),
-        userId,
-      ]);
-      if (result && result.rows && result.rows.length > 0) {
-        updatedRecord = {
-          ...result.rows[0],
-          amount: parseFloat(result.rows[0].amount),
-        };
-      }
-    } catch (e) {}
-
-    // Also update segregation if exists
-    try {
-      const updateSegQuery = `
-        UPDATE segregation
-        SET name = $1, description = $2, date = $3, time = $4, schedule = $5, category = $6, associated_wallet = $7, amount = $8
-        WHERE id = $9 AND user_id = $10
-        RETURNING *;
-      `;
-      const segResult = await query(updateSegQuery, [
-        name.trim(),
-        description.trim(),
-        cleanDate,
-        cleanTime,
-        schedule,
-        category,
-        associated_wallet,
-        numericAmount,
-        parseInt(id, 10),
-        userId,
-      ]);
-      if (!updatedRecord && segResult && segResult.rows && segResult.rows.length > 0) {
-        updatedRecord = {
-          ...segResult.rows[0],
-          amount: parseFloat(segResult.rows[0].amount),
-        };
-      }
-    } catch (e) {}
-
-    if (!updatedRecord) {
-      return res.status(404).json({ success: false, message: 'Bill not found or unauthorized' });
-    }
-
-    return res.status(200).json({
-      success: true,
-      message: 'Bill updated successfully',
-      data: updatedRecord,
-      company: COMPANY_NAME,
-    });
-  } catch (err) {
-    console.error('PUT /api/bills/:id error:', err);
-    return res.status(500).json({ success: false, message: 'Internal server error while updating bill', error: err.message });
-  }
-});
-
-/**
- * DELETE /api/bills/:id
- * Remove a bill strictly scoped by user_id
- */
-app.delete('/api/bills/:id', async (req, res) => {
-  try {
-    const userId = getUserId(req);
-    if (!userId) {
-      return res.status(401).json({ success: false, message: 'Authentication required' });
-    }
-
-    const { id } = req.params;
-    let deleted = false;
-
-    try {
-      const deleteBillsQuery = `DELETE FROM bills WHERE id = $1 AND user_id = $2 RETURNING id;`;
-      const bRes = await query(deleteBillsQuery, [parseInt(id, 10), userId]);
-      if (bRes && bRes.rows && bRes.rows.length > 0) deleted = true;
-    } catch (e) {}
-
-    try {
-      const deleteSegQuery = `DELETE FROM segregation WHERE id = $1 AND user_id = $2 RETURNING id;`;
-      const sRes = await query(deleteSegQuery, [parseInt(id, 10), userId]);
-      if (sRes && sRes.rows && sRes.rows.length > 0) deleted = true;
-    } catch (e) {}
-
-    if (!deleted) {
-      return res.status(404).json({ success: false, message: 'Bill not found or unauthorized' });
-    }
-
-    return res.status(200).json({
-      success: true,
-      message: 'Bill deleted successfully',
-      id: parseInt(id, 10),
-      company: COMPANY_NAME,
-    });
-  } catch (err) {
-    console.error('DELETE /api/bills/:id error:', err);
-    return res.status(500).json({ success: false, message: 'Internal server error while deleting bill', error: err.message });
-  }
-});
-
-/**
-<<<<<<< HEAD
  * GET /api/segregation & GET /api/finance-records
  * Retrieve finance segregation records for the authenticated user
-=======
- * GET /api/segregation
- * Retrieve finance segregation records strictly scoped to authenticated user
->>>>>>> 05e1eb0e99dc5cb24da27162ad325b8805b5018b
  */
 app.get(['/api/segregation', '/api/finance-records'], authenticate, async (req, res) => {
   try {
-<<<<<<< HEAD
     const userId = req.user.id;
-=======
-    const userId = getUserId(req);
-    if (!userId) {
-      return res.status(401).json({ success: false, message: 'Authentication required' });
-    }
-
->>>>>>> 05e1eb0e99dc5cb24da27162ad325b8805b5018b
     const { type } = req.query;
 
     const selectSegregation = type
@@ -757,7 +334,6 @@ app.get(['/api/segregation', '/api/finance-records'], authenticate, async (req, 
     if (!result.rows || result.rows.length === 0) {
       const selectFinance = type
         ? `SELECT id, type, name, description, date, time, schedule, category, associated_wallet, wallet_id, amount, user_id, created_at
-<<<<<<< HEAD
            FROM finance_records
            WHERE user_id = $1 AND type = $2
            ORDER BY date DESC, created_at DESC;`
@@ -773,55 +349,6 @@ app.get(['/api/segregation', '/api/finance-records'], authenticate, async (req, 
 
     const rows = result.rows || [];
     const formattedRows = rows.map((row) => ({
-=======
-           FROM segregation
-           WHERE type = $1 AND user_id = $2
-           ORDER BY date DESC, created_at DESC;`
-        : `SELECT id, type, name, description, date, time, schedule, category, associated_wallet, wallet_id, amount, user_id, created_at
-           FROM segregation
-           WHERE user_id = $1
-           ORDER BY date DESC, created_at DESC;`;
-      result = await query(selectQuery, type ? [type, userId] : [userId]);
-    } catch (err) {
-      console.error('Error querying segregation:', err.message);
-      // Fallback to finance_records if segregation table query failed
-      try {
-        const selectQuery = type
-          ? `SELECT id, type, name, description, date, time, schedule, category, associated_wallet, wallet_id, amount, user_id, created_at
-             FROM finance_records
-             WHERE type = $1 AND user_id = $2
-             ORDER BY date DESC, created_at DESC;`
-          : `SELECT id, type, name, description, date, time, schedule, category, associated_wallet, wallet_id, amount, user_id, created_at
-             FROM finance_records
-             WHERE user_id = $1
-             ORDER BY date DESC, created_at DESC;`;
-        result = await query(selectQuery, type ? [type, userId] : [userId]);
-      } catch (err2) {
-        console.error('Fallback finance_records error:', err2.message);
-        return res.status(200).json({ success: true, count: 0, data: [] });
-      }
-    }
-
-    if (!result || !result.rows || result.rows.length === 0) {
-      // If type === 'bill' and segregation is empty, check bills table
-      if (type === 'bill') {
-        try {
-          const bResult = await query(
-            `SELECT id, 'bill' AS type, name, description, date, time, schedule, category, associated_wallet, amount, user_id, created_at
-             FROM bills
-             WHERE user_id = $1
-             ORDER BY date DESC, created_at DESC;`,
-            [userId]
-          );
-          if (bResult && bResult.rows && bResult.rows.length > 0) {
-            result = bResult;
-          }
-        } catch (e) {}
-      }
-    }
-
-    const formattedRows = (result?.rows || []).map((row) => ({
->>>>>>> 05e1eb0e99dc5cb24da27162ad325b8805b5018b
       ...row,
       amount: parseFloat(row.amount) || 0,
       date: row.date
@@ -840,40 +367,22 @@ app.get(['/api/segregation', '/api/finance-records'], authenticate, async (req, 
       company: COMPANY_NAME,
     });
   } catch (err) {
-<<<<<<< HEAD
     console.error('Unhandled segregation fetch error:', err.message);
     return res.status(500).json({
       success: false,
       message: 'Failed to retrieve finance records',
       error: err.message,
     });
-=======
-    console.error('GET /api/segregation error:', err);
-    return res.status(200).json({ success: true, count: 0, data: [] });
->>>>>>> 05e1eb0e99dc5cb24da27162ad325b8805b5018b
   }
 });
 
 /**
-<<<<<<< HEAD
  * POST /api/segregation & POST /api/finance-records
  * Create a new finance segregation record for the authenticated user
-=======
- * POST /api/segregation
- * Validate and persist new finance records scoped to user_id
->>>>>>> 05e1eb0e99dc5cb24da27162ad325b8805b5018b
  */
 app.post(['/api/segregation', '/api/finance-records'], authenticate, async (req, res) => {
   try {
-<<<<<<< HEAD
     const userId = req.user.id;
-=======
-    const userId = getUserId(req);
-    if (!userId) {
-      return res.status(401).json({ success: false, message: 'Authentication required' });
-    }
-
->>>>>>> 05e1eb0e99dc5cb24da27162ad325b8805b5018b
     const {
       type,
       name,
@@ -926,89 +435,27 @@ app.post(['/api/segregation', '/api/finance-records'], authenticate, async (req,
       userId,
     ];
 
-<<<<<<< HEAD
     const insertSegregationQuery = `
       INSERT INTO segregation (type, name, description, date, time, schedule, category, associated_wallet, amount, user_id)
       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
       RETURNING id, type, name, description, date, time, schedule, category, associated_wallet, amount, user_id, created_at;
     `;
     const result = await pool.query(insertSegregationQuery, insertParams);
-=======
-    try {
-      const insertSegregationQuery = `
-        INSERT INTO segregation (type, name, description, date, time, schedule, category, associated_wallet, amount, user_id)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-        RETURNING id, type, name, description, date, time, schedule, category, associated_wallet, amount, user_id, created_at;
-      `;
-      result = await query(insertSegregationQuery, insertParams);
-    } catch (e) {}
->>>>>>> 05e1eb0e99dc5cb24da27162ad325b8805b5018b
 
     // Dual-write to finance_records for consistency
     try {
       const insertFinanceQuery = `
         INSERT INTO finance_records (type, name, description, date, time, schedule, category, associated_wallet, amount, user_id)
-<<<<<<< HEAD
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10);
-=======
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-        RETURNING id, type, name, description, date, time, schedule, category, associated_wallet, amount, user_id, created_at;
->>>>>>> 05e1eb0e99dc5cb24da27162ad325b8805b5018b
       `;
       await pool.query(insertFinanceQuery, insertParams);
     } catch (e) {}
 
-    // If type === 'bill', also sync into bills table
-    if (type === 'bill') {
-      try {
-        await query(
-          `INSERT INTO bills (name, description, date, due_date, time, schedule, category, associated_wallet, amount, user_id)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10);`,
-          [name.trim(), description.trim(), cleanDate, cleanDate, cleanTime, schedule, category, associated_wallet, numericAmount, userId]
-        );
-      } catch (e) {}
-    }
+    const createdRecord = {
+      ...result.rows[0],
+      amount: parseFloat(result.rows[0].amount),
+    };
 
-<<<<<<< HEAD
-=======
-    // If type is expense, sync into expenses table
-    if (type === 'additional_expense' || type === 'fixed_expense') {
-      try {
-        await query(
-          `INSERT INTO expenses (name, description, date, time, category, associated_wallet, amount, type, user_id)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9);`,
-          [name.trim(), description.trim(), cleanDate, cleanTime, category, associated_wallet, numericAmount, type, userId]
-        );
-      } catch (e) {}
-    }
-
-    let createdRecord;
-    if (result && result.rows && result.rows.length > 0) {
-      createdRecord = {
-        ...result.rows[0],
-        amount: parseFloat(result.rows[0].amount),
-      };
-    } else {
-      createdRecord = {
-        id: Date.now(),
-        type,
-        name: name.trim(),
-        description: description.trim(),
-        date: cleanDate,
-        time: cleanTime,
-        schedule,
-        category,
-        associated_wallet,
-        amount: numericAmount,
-        user_id: userId,
-        created_at: new Date().toISOString(),
-      };
-      inMemorySegregation.unshift(createdRecord);
-    }
-
-    console.log(`[STS FINTECH] Segregation record created: ${createdRecord.type} - "${createdRecord.name}" (₹${createdRecord.amount}) for user ${userId}`);
-
->>>>>>> 05e1eb0e99dc5cb24da27162ad325b8805b5018b
     return res.status(201).json({
       success: true,
       message: 'Finance record created successfully',
@@ -1026,25 +473,12 @@ app.post(['/api/segregation', '/api/finance-records'], authenticate, async (req,
 });
 
 /**
-<<<<<<< HEAD
  * PUT /api/segregation/:id & PUT /api/finance-records/:id
  * Update an existing finance record owned by the authenticated user
-=======
- * PUT /api/segregation/:id
- * Update an existing finance record strictly scoped by user_id
->>>>>>> 05e1eb0e99dc5cb24da27162ad325b8805b5018b
  */
 app.put(['/api/segregation/:id', '/api/finance-records/:id'], authenticate, async (req, res) => {
   try {
-<<<<<<< HEAD
     const userId = req.user.id;
-=======
-    const userId = getUserId(req);
-    if (!userId) {
-      return res.status(401).json({ success: false, message: 'Authentication required' });
-    }
-
->>>>>>> 05e1eb0e99dc5cb24da27162ad325b8805b5018b
     const { id } = req.params;
     const recordId = parseInt(id, 10);
 
@@ -1093,7 +527,6 @@ app.put(['/api/segregation/:id', '/api/finance-records/:id'], authenticate, asyn
       category,
       associated_wallet,
       numericAmount,
-<<<<<<< HEAD
       recordId,
       userId,
     ];
@@ -1105,22 +538,6 @@ app.put(['/api/segregation/:id', '/api/finance-records/:id'], authenticate, asyn
       RETURNING id, type, name, description, date, time, schedule, category, associated_wallet, amount, user_id, created_at;
     `;
     let result = await pool.query(updateSegQuery, updateParams);
-=======
-      parseInt(id, 10),
-      userId,
-    ];
-
-    let result;
-    try {
-      const updateSegQuery = `
-        UPDATE segregation
-        SET name = $1, description = $2, date = $3, time = $4, schedule = $5, category = $6, associated_wallet = $7, amount = $8
-        WHERE id = $9 AND user_id = $10
-        RETURNING id, type, name, description, date, time, schedule, category, associated_wallet, amount, user_id, created_at;
-      `;
-      result = await query(updateSegQuery, updateParams);
-    } catch (e) {}
->>>>>>> 05e1eb0e99dc5cb24da27162ad325b8805b5018b
 
     // Also update finance_records if segregation was not matched
     if (!result.rows || result.rows.length === 0) {
@@ -1146,11 +563,7 @@ app.put(['/api/segregation/:id', '/api/finance-records/:id'], authenticate, asyn
     if (!result.rows || result.rows.length === 0) {
       return res.status(404).json({
         success: false,
-<<<<<<< HEAD
         message: 'Finance record not found.',
-=======
-        message: 'Record not found or unauthorized',
->>>>>>> 05e1eb0e99dc5cb24da27162ad325b8805b5018b
       });
     }
 
@@ -1181,17 +594,11 @@ app.put(['/api/segregation/:id', '/api/finance-records/:id'], authenticate, asyn
 });
 
 /**
-<<<<<<< HEAD
  * DELETE /api/segregation/:id & DELETE /api/finance-records/:id
  * Delete a finance record owned by the authenticated user
-=======
- * DELETE /api/segregation/:id
- * Remove a finance record strictly scoped by user_id
->>>>>>> 05e1eb0e99dc5cb24da27162ad325b8805b5018b
  */
 app.delete(['/api/segregation/:id', '/api/finance-records/:id'], authenticate, async (req, res) => {
   try {
-<<<<<<< HEAD
     const userId = req.user.id;
     const { id } = req.params;
     const recordId = parseInt(id, 10);
@@ -1212,39 +619,6 @@ app.delete(['/api/segregation/:id', '/api/finance-records/:id'], authenticate, a
         message: 'Finance record not found.',
       });
     }
-=======
-    const userId = getUserId(req);
-    if (!userId) {
-      return res.status(401).json({ success: false, message: 'Authentication required' });
-    }
-
-    const { id } = req.params;
-    let deleted = false;
-
-    try {
-      const sRes = await query(`DELETE FROM segregation WHERE id = $1 AND user_id = $2 RETURNING id;`, [parseInt(id, 10), userId]);
-      if (sRes && sRes.rows && sRes.rows.length > 0) deleted = true;
-    } catch (e) {}
-
-    try {
-      const fRes = await query(`DELETE FROM finance_records WHERE id = $1 AND user_id = $2 RETURNING id;`, [parseInt(id, 10), userId]);
-      if (fRes && fRes.rows && fRes.rows.length > 0) deleted = true;
-    } catch (e) {}
-
-    try {
-      const bRes = await query(`DELETE FROM bills WHERE id = $1 AND user_id = $2 RETURNING id;`, [parseInt(id, 10), userId]);
-      if (bRes && bRes.rows && bRes.rows.length > 0) deleted = true;
-    } catch (e) {}
-
-    if (!deleted) {
-      return res.status(404).json({
-        success: false,
-        message: 'Record not found or unauthorized',
-      });
-    }
-
-    console.log(`[STS FINTECH] Segregation record deleted: ID ${id} for user ${userId}`);
->>>>>>> 05e1eb0e99dc5cb24da27162ad325b8805b5018b
 
     return res.status(200).json({
       success: true,
@@ -1263,17 +637,11 @@ app.delete(['/api/segregation/:id', '/api/finance-records/:id'], authenticate, a
 });
 
 /**
-<<<<<<< HEAD
  * GET /api/wallets & GET /api/goal-wallets
  * Retrieve all segregated goal wallets for the authenticated user
-=======
- * GET /api/wallets
- * Retrieve all segregated goal wallets strictly scoped to authenticated user
->>>>>>> 05e1eb0e99dc5cb24da27162ad325b8805b5018b
  */
 app.get(['/api/wallets', '/api/goal-wallets'], authenticate, async (req, res) => {
   try {
-<<<<<<< HEAD
     const userId = req.user.id;
     const selectQuery = `
       SELECT id, name, target_amount, saved_amount, description, status, type, balance, user_id, created_at
@@ -1298,75 +666,6 @@ app.get(['/api/wallets', '/api/goal-wallets'], authenticate, async (req, res) =>
 
     const rows = result.rows || [];
     const formattedRows = rows.map((row) => ({
-=======
-    const userId = getUserId(req);
-    if (!userId) {
-      return res.status(401).json({ success: false, message: 'Authentication required' });
-    }
-
-    let result = { rows: [] };
-
-    try {
-      const selectQuery = `
-        SELECT id, name, target_amount, saved_amount, description, status, type, balance, user_id, created_at
-        FROM goal_wallets
-        WHERE user_id = $1
-        ORDER BY created_at DESC;
-      `;
-      result = await query(selectQuery, [userId]);
-    } catch (err) {
-      console.error('Error querying goal_wallets:', err.message);
-      try {
-        const fallbackQuery = `
-          SELECT id, name, COALESCE(target_amount, balance, 0) AS target_amount, COALESCE(saved_amount, balance, 0) AS saved_amount, description, status, type, balance, user_id, created_at
-          FROM goal_targets
-          WHERE user_id = $1
-          ORDER BY created_at DESC;
-        `;
-        result = await query(fallbackQuery, [userId]);
-      } catch (err2) {
-        try {
-          const fallbackQuery2 = `
-            SELECT id, name, COALESCE(target_amount, balance, 0) AS target_amount, COALESCE(saved_amount, balance, 0) AS saved_amount, description, status, type, balance, user_id, created_at
-            FROM wallets
-            WHERE user_id = $1
-            ORDER BY created_at DESC;
-          `;
-          result = await query(fallbackQuery2, [userId]);
-        } catch (err3) {
-          return res.status(200).json({ success: true, count: 0, data: [] });
-        }
-      }
-    }
-
-    if (!result || !result.rows || result.rows.length === 0) {
-      try {
-        const fallbackQuery = `
-          SELECT id, name, COALESCE(target_amount, balance, 0) AS target_amount, COALESCE(saved_amount, balance, 0) AS saved_amount, description, status, type, balance, user_id, created_at
-          FROM goal_targets
-          WHERE user_id = $1
-          ORDER BY created_at DESC;
-        `;
-        const fbResult = await query(fallbackQuery, [userId]);
-        if (fbResult && fbResult.rows && fbResult.rows.length > 0) {
-          result = fbResult;
-        } else {
-          const fb2 = await query(
-            `SELECT id, name, COALESCE(target_amount, balance, 0) AS target_amount, COALESCE(saved_amount, balance, 0) AS saved_amount, description, status, type, balance, user_id, created_at
-             FROM wallets
-             WHERE user_id = $1
-             ORDER BY created_at DESC;`,
-            [userId]
-          );
-          if (fb2 && fb2.rows && fb2.rows.length > 0) {
-            result = fb2;
-          }
-        }
-      } catch (e) {}
-    }
-
-    const formattedRows = (result?.rows || []).map((row) => ({
->>>>>>> 05e1eb0e99dc5cb24da27162ad325b8805b5018b
       ...row,
       target_amount: parseFloat(row.target_amount) || parseFloat(row.balance) || 0,
       saved_amount: parseFloat(row.saved_amount) || 0,
@@ -1379,39 +678,22 @@ app.get(['/api/wallets', '/api/goal-wallets'], authenticate, async (req, res) =>
       company: COMPANY_NAME,
     });
   } catch (err) {
-<<<<<<< HEAD
     console.error('Error fetching wallets:', err.message);
     return res.status(500).json({
       success: false,
       message: 'Failed to retrieve wallets',
       error: err.message,
     });
-=======
-    console.error('GET /api/wallets error:', err.message);
-    return res.status(200).json({ success: true, count: 0, data: [] });
->>>>>>> 05e1eb0e99dc5cb24da27162ad325b8805b5018b
   }
 });
 
 /**
-<<<<<<< HEAD
  * POST /api/wallets & POST /api/goal-wallets
  * Setup a new purpose target wallet assigned to the authenticated user
-=======
- * POST /api/wallets
- * Setup a new purpose target wallet scoped to user_id
->>>>>>> 05e1eb0e99dc5cb24da27162ad325b8805b5018b
  */
 app.post(['/api/wallets', '/api/goal-wallets'], authenticate, async (req, res) => {
   try {
-<<<<<<< HEAD
     const userId = req.user.id;
-=======
-    const userId = getUserId(req);
-    if (!userId) {
-      return res.status(401).json({ success: false, message: 'Authentication required' });
-    }
->>>>>>> 05e1eb0e99dc5cb24da27162ad325b8805b5018b
 
     const rawName =
       req.body.name ??
@@ -1451,7 +733,6 @@ app.post(['/api/wallets', '/api/goal-wallets'], authenticate, async (req, res) =
     const rawType = req.body.type ?? req.body.category ?? 'goal';
     const cleanType = typeof rawType === 'string' && rawType.trim().length > 0 ? rawType.trim() : 'goal';
 
-<<<<<<< HEAD
     const insertFullQuery = `
       INSERT INTO goal_wallets (name, target_amount, saved_amount, description, status, type, balance, user_id)
       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
@@ -1473,118 +754,6 @@ app.post(['/api/wallets', '/api/goal-wallets'], authenticate, async (req, res) =
       target_amount: parseFloat(result.rows[0].target_amount) || numericTarget,
       saved_amount: parseFloat(result.rows[0].saved_amount) || 0,
     };
-=======
-    let createdWallet = null;
-
-    if (isDatabaseConfigured && pool) {
-      try {
-        const insertFullQuery = `
-          INSERT INTO goal_wallets (name, target_amount, saved_amount, description, status, type, balance, user_id)
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-          RETURNING id, name, target_amount, saved_amount, description, status, type, balance, user_id, created_at;
-        `;
-        const result = await pool.query(insertFullQuery, [
-          cleanName,
-          numericTarget,
-          0.0,
-          cleanDescription,
-          'in_progress',
-          cleanType,
-          0.0,
-          userId,
-        ]);
-
-        if (result.rows && result.rows.length > 0) {
-          createdWallet = {
-            ...result.rows[0],
-            target_amount: parseFloat(result.rows[0].target_amount) || numericTarget,
-            saved_amount: parseFloat(result.rows[0].saved_amount) || 0,
-          };
-        }
-      } catch (dbErr) {
-        console.error('[STS FINTECH] Error inserting into goal_wallets table:', dbErr.message || dbErr);
-
-        // Fallback to goal_targets table
-        try {
-          const insertGtQuery = `
-            INSERT INTO goal_targets (name, target_amount, saved_amount, description, status, type, balance, user_id)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-            RETURNING id, name, target_amount, saved_amount, description, status, type, balance, user_id, created_at;
-          `;
-          const gtRes = await pool.query(insertGtQuery, [
-            cleanName,
-            numericTarget,
-            0.0,
-            cleanDescription,
-            'in_progress',
-            cleanType,
-            0.0,
-            userId,
-          ]);
-          if (gtRes.rows && gtRes.rows.length > 0) {
-            createdWallet = {
-              ...gtRes.rows[0],
-              target_amount: parseFloat(gtRes.rows[0].target_amount) || numericTarget,
-              saved_amount: parseFloat(gtRes.rows[0].saved_amount) || 0,
-            };
-          }
-        } catch (gtErr) {}
-
-        // Fallback to wallets table
-        if (!createdWallet) {
-          try {
-            const insertWalletsQuery = `
-              INSERT INTO wallets (name, type, balance, target_amount, saved_amount, description, status, user_id)
-              VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-              RETURNING id, name, target_amount, saved_amount, description, status, type, balance, user_id, created_at;
-            `;
-            const wResult = await pool.query(insertWalletsQuery, [
-              cleanName,
-              cleanType,
-              0.0,
-              numericTarget,
-              0.0,
-              cleanDescription,
-              'in_progress',
-              userId,
-            ]);
-            if (wResult.rows && wResult.rows.length > 0) {
-              createdWallet = {
-                ...wResult.rows[0],
-                target_amount: parseFloat(wResult.rows[0].target_amount) || numericTarget,
-                saved_amount: parseFloat(wResult.rows[0].saved_amount) || 0,
-              };
-            }
-          } catch (wErr) {}
-        }
-      }
-    }
-
-    if (!createdWallet) {
-      const nextId =
-        inMemoryGoalWallets.length > 0
-          ? Math.max(...inMemoryGoalWallets.map((w) => Number(w.id) || 0)) + 1
-          : 1;
-
-      createdWallet = {
-        id: nextId,
-        name: cleanName,
-        target_amount: numericTarget,
-        saved_amount: 0.0,
-        balance: 0.0,
-        description: cleanDescription,
-        status: 'in_progress',
-        type: cleanType,
-        user_id: userId,
-        created_at: new Date().toISOString(),
-      };
-      inMemoryGoalWallets.unshift(createdWallet);
-    } else {
-      inMemoryGoalWallets.unshift(createdWallet);
-    }
->>>>>>> 05e1eb0e99dc5cb24da27162ad325b8805b5018b
-
-    console.log(`[STS FINTECH] Goal wallet created: "${createdWallet.name}" (Target: ₹${createdWallet.target_amount}) for user ${userId}`);
 
     return res.status(201).json({
       success: true,
@@ -1593,11 +762,7 @@ app.post(['/api/wallets', '/api/goal-wallets'], authenticate, async (req, res) =
       company: COMPANY_NAME,
     });
   } catch (error) {
-<<<<<<< HEAD
     console.error('Error creating wallet:', error);
-=======
-    console.error('[STS FINTECH] Error in POST /api/wallets:', error);
->>>>>>> 05e1eb0e99dc5cb24da27162ad325b8805b5018b
     return res.status(500).json({
       success: false,
       message: 'Failed to create goal wallet',
@@ -1607,25 +772,12 @@ app.post(['/api/wallets', '/api/goal-wallets'], authenticate, async (req, res) =
 });
 
 /**
-<<<<<<< HEAD
  * POST /api/wallets/:id/add-cash & POST /api/goal-wallets/:id/add-cash
  * Allocate cash towards an owned goal wallet
-=======
- * POST /api/wallets/:id/add-cash
- * Allocate cash towards a goal wallet strictly scoped by user_id
->>>>>>> 05e1eb0e99dc5cb24da27162ad325b8805b5018b
  */
 app.post(['/api/wallets/:id/add-cash', '/api/goal-wallets/:id/add-cash'], authenticate, async (req, res) => {
   try {
-<<<<<<< HEAD
     const userId = req.user.id;
-=======
-    const userId = getUserId(req);
-    if (!userId) {
-      return res.status(401).json({ success: false, message: 'Authentication required' });
-    }
-
->>>>>>> 05e1eb0e99dc5cb24da27162ad325b8805b5018b
     const { id } = req.params;
     const walletId = parseInt(id, 10);
 
@@ -1645,17 +797,12 @@ app.post(['/api/wallets/:id/add-cash', '/api/goal-wallets/:id/add-cash'], authen
       });
     }
 
-<<<<<<< HEAD
     // Verify wallet ownership
-=======
-    // Check existing wallet strictly scoped by user_id
->>>>>>> 05e1eb0e99dc5cb24da27162ad325b8805b5018b
     const checkQuery = `
       SELECT id, name, target_amount, saved_amount, status
       FROM goal_wallets
       WHERE id = $1 AND user_id = $2;
     `;
-<<<<<<< HEAD
     let checkResult = await pool.query(checkQuery, [walletId, userId]);
 
     if (!checkResult.rows || checkResult.rows.length === 0) {
@@ -1667,21 +814,6 @@ app.post(['/api/wallets/:id/add-cash', '/api/goal-wallets/:id/add-cash'], authen
           message: 'Wallet container not found.',
         });
       }
-=======
-    let checkResult = await query(checkQuery, [id, userId]);
-    if (!checkResult.rows || checkResult.rows.length === 0) {
-      // Check goal_targets
-      try {
-        checkResult = await query(`SELECT id, name, target_amount, saved_amount, status FROM goal_targets WHERE id = $1 AND user_id = $2;`, [id, userId]);
-      } catch (e) {}
-    }
-
-    if (!checkResult.rows || checkResult.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: 'Wallet container not found or unauthorized',
-      });
->>>>>>> 05e1eb0e99dc5cb24da27162ad325b8805b5018b
     }
 
     const currentWallet = checkResult.rows[0];
@@ -1701,15 +833,10 @@ app.post(['/api/wallets/:id/add-cash', '/api/goal-wallets/:id/add-cash'], authen
       SET saved_amount = saved_amount + $1,
           status = CASE WHEN (saved_amount + $1) >= target_amount THEN 'target_met' ELSE status END
       WHERE id = $2 AND user_id = $3
-<<<<<<< HEAD
       RETURNING id, name, target_amount, saved_amount, description, status, user_id, created_at;
-=======
-      RETURNING id, name, target_amount, saved_amount, description, status, created_at;
->>>>>>> 05e1eb0e99dc5cb24da27162ad325b8805b5018b
     `;
     let result = await pool.query(updateQuery, [numericAmount, walletId, userId]);
 
-<<<<<<< HEAD
     if (!result.rows || result.rows.length === 0) {
       const updateWalletsQuery = `
         UPDATE wallets
@@ -1719,31 +846,12 @@ app.post(['/api/wallets/:id/add-cash', '/api/goal-wallets/:id/add-cash'], authen
         RETURNING id, name, target_amount, saved_amount, description, status, user_id, created_at;
       `;
       result = await pool.query(updateWalletsQuery, [numericAmount, walletId, userId]);
-=======
-    let result = await query(updateQuery, [numericAmount, id, userId]);
-
-    if (!result.rows || result.rows.length === 0) {
-      try {
-        result = await query(
-          `UPDATE goal_targets
-           SET saved_amount = saved_amount + $1,
-               status = CASE WHEN (saved_amount + $1) >= target_amount THEN 'target_met' ELSE status END
-           WHERE id = $2 AND user_id = $3
-           RETURNING id, name, target_amount, saved_amount, description, status, created_at;`,
-          [numericAmount, id, userId]
-        );
-      } catch (e) {}
->>>>>>> 05e1eb0e99dc5cb24da27162ad325b8805b5018b
     }
 
     if (!result.rows || result.rows.length === 0) {
       return res.status(404).json({
         success: false,
-<<<<<<< HEAD
         message: 'Wallet container not found.',
-=======
-        message: 'Wallet container not found or unauthorized',
->>>>>>> 05e1eb0e99dc5cb24da27162ad325b8805b5018b
       });
     }
 
@@ -1769,17 +877,11 @@ app.post(['/api/wallets/:id/add-cash', '/api/goal-wallets/:id/add-cash'], authen
 });
 
 /**
-<<<<<<< HEAD
  * DELETE /api/wallets/:id & DELETE /api/goal-wallets/:id
  * Remove an owned goal wallet
-=======
- * DELETE /api/wallets/:id
- * Remove a goal wallet strictly scoped by user_id
->>>>>>> 05e1eb0e99dc5cb24da27162ad325b8805b5018b
  */
 app.delete(['/api/wallets/:id', '/api/goal-wallets/:id'], authenticate, async (req, res) => {
   try {
-<<<<<<< HEAD
     const userId = req.user.id;
     const { id } = req.params;
     const walletId = parseInt(id, 10);
@@ -1798,38 +900,6 @@ app.delete(['/api/wallets/:id', '/api/goal-wallets/:id'], authenticate, async (r
       return res.status(404).json({
         success: false,
         message: 'Wallet container not found.',
-=======
-    const userId = getUserId(req);
-    if (!userId) {
-      return res.status(401).json({ success: false, message: 'Authentication required' });
-    }
-
-    const { id } = req.params;
-    let deleted = false;
-
-    try {
-      const deleteQuery = `DELETE FROM goal_wallets WHERE id = $1 AND user_id = $2 RETURNING id;`;
-      const res1 = await query(deleteQuery, [id, userId]);
-      if (res1 && res1.rows && res1.rows.length > 0) deleted = true;
-    } catch (e) {}
-
-    try {
-      const deleteGtQuery = `DELETE FROM goal_targets WHERE id = $1 AND user_id = $2 RETURNING id;`;
-      const res2 = await query(deleteGtQuery, [id, userId]);
-      if (res2 && res2.rows && res2.rows.length > 0) deleted = true;
-    } catch (e) {}
-
-    try {
-      const deleteWQuery = `DELETE FROM wallets WHERE id = $1 AND user_id = $2 RETURNING id;`;
-      const res3 = await query(deleteWQuery, [id, userId]);
-      if (res3 && res3.rows && res3.rows.length > 0) deleted = true;
-    } catch (e) {}
-
-    if (!deleted) {
-      return res.status(404).json({
-        success: false,
-        message: 'Wallet not found or unauthorized',
->>>>>>> 05e1eb0e99dc5cb24da27162ad325b8805b5018b
       });
     }
 
@@ -1848,7 +918,6 @@ app.delete(['/api/wallets/:id', '/api/goal-wallets/:id'], authenticate, async (r
 });
 
 /**
-<<<<<<< HEAD
  * GET /api/transactions
  * Retrieve transactions for the authenticated user
  */
@@ -1869,48 +938,10 @@ app.get('/api/transactions', authenticate, async (req, res) => {
     const formatted = (result.rows || []).map(r => ({
       ...r,
       amount: parseFloat(r.amount) || 0,
-=======
- * GET /api/goals
- * Retrieve goal targets strictly scoped to authenticated user
- */
-app.get('/api/goals', async (req, res) => {
-  try {
-    const userId = getUserId(req);
-    if (!userId) {
-      return res.status(401).json({ success: false, message: 'Authentication required' });
-    }
-
-    let result = { rows: [] };
-    try {
-      const selectQuery = `
-        SELECT id, name, target_amount, saved_amount, description, status, type, balance, user_id, created_at
-        FROM goal_wallets
-        WHERE user_id = $1
-        ORDER BY created_at DESC;
-      `;
-      result = await query(selectQuery, [userId]);
-    } catch (err) {
-      try {
-        result = await query(
-          `SELECT id, name, COALESCE(target_amount, balance, 0) AS target_amount, COALESCE(saved_amount, balance, 0) AS saved_amount, description, status, type, balance, user_id, created_at
-           FROM goal_targets
-           WHERE user_id = $1
-           ORDER BY created_at DESC;`,
-          [userId]
-        );
-      } catch (e) {}
-    }
-
-    const formattedRows = (result?.rows || []).map((row) => ({
-      ...row,
-      target_amount: parseFloat(row.target_amount) || parseFloat(row.balance) || 0,
-      saved_amount: parseFloat(row.saved_amount) || 0,
->>>>>>> 05e1eb0e99dc5cb24da27162ad325b8805b5018b
     }));
 
     return res.status(200).json({
       success: true,
-<<<<<<< HEAD
       count: formatted.length,
       data: formatted,
     });
@@ -2195,269 +1226,6 @@ app.get(['/api/dashboard/summary', '/api/summary'], authenticate, async (req, re
       message: 'Failed to retrieve dashboard summary',
       error: err.message,
     });
-=======
-      count: formattedRows.length,
-      data: formattedRows,
-      company: COMPANY_NAME,
-    });
-  } catch (err) {
-    console.error('GET /api/goals error:', err);
-    return res.status(500).json({ success: false, message: 'Error retrieving goals', error: err.message });
-  }
-});
-
-/**
- * POST /api/goals
- * Create a new goal target strictly scoped to user_id
- */
-app.post('/api/goals', async (req, res) => {
-  req.url = '/api/wallets';
-  return app._router.handle(req, res);
-});
-
-/**
- * PUT /api/goals/:id
- * Update goal strictly scoped to user_id
- */
-app.put('/api/goals/:id', async (req, res) => {
-  try {
-    const userId = getUserId(req);
-    if (!userId) {
-      return res.status(401).json({ success: false, message: 'Authentication required' });
-    }
-    const { id } = req.params;
-    const { name, target_amount, saved_amount, description, status } = req.body;
-    const updateParams = [
-      name ? name.trim() : null,
-      target_amount !== undefined ? parseFloat(target_amount) : null,
-      saved_amount !== undefined ? parseFloat(saved_amount) : null,
-      description !== undefined ? description.trim() : null,
-      status || null,
-      id,
-      userId,
-    ];
-    const updateQuery = `
-      UPDATE goal_wallets
-      SET name = COALESCE($1, name),
-          target_amount = COALESCE($2, target_amount),
-          saved_amount = COALESCE($3, saved_amount),
-          description = COALESCE($4, description),
-          status = COALESCE($5, status)
-      WHERE id = $6 AND user_id = $7
-      RETURNING *;
-    `;
-    let result = await query(updateQuery, updateParams);
-    if (!result.rows || result.rows.length === 0) {
-      try {
-        result = await query(
-          `UPDATE goal_targets
-           SET name = COALESCE($1, name),
-               target_amount = COALESCE($2, target_amount),
-               saved_amount = COALESCE($3, saved_amount),
-               description = COALESCE($4, description),
-               status = COALESCE($5, status)
-           WHERE id = $6 AND user_id = $7
-           RETURNING *;`,
-          updateParams
-        );
-      } catch (e) {}
-    }
-    if (!result.rows || result.rows.length === 0) {
-      return res.status(404).json({ success: false, message: 'Goal not found or unauthorized' });
-    }
-    return res.status(200).json({ success: true, data: result.rows[0] });
-  } catch (err) {
-    return res.status(500).json({ success: false, message: err.message });
-  }
-});
-
-/**
- * DELETE /api/goals/:id
- * Delete goal strictly scoped to user_id
- */
-app.delete('/api/goals/:id', async (req, res) => {
-  req.url = `/api/wallets/${req.params.id}`;
-  return app._router.handle(req, res);
-});
-
-/**
- * GET /api/expenses
- * Retrieve expenses strictly scoped to authenticated user
- */
-app.get('/api/expenses', async (req, res) => {
-  try {
-    const userId = getUserId(req);
-    if (!userId) {
-      return res.status(401).json({ success: false, message: 'Authentication required' });
-    }
-
-    let result = { rows: [] };
-    try {
-      const selectQuery = `
-        SELECT id, name, description, date, time, category, associated_wallet, amount, type, user_id, created_at
-        FROM expenses
-        WHERE user_id = $1
-        ORDER BY date DESC, created_at DESC;
-      `;
-      result = await query(selectQuery, [userId]);
-    } catch (err) {
-      // Fallback to segregation WHERE (type = 'additional_expense' OR type = 'fixed_expense') AND user_id = $1
-      try {
-        const fallbackQuery = `
-          SELECT id, type, name, description, date, time, schedule, category, associated_wallet, amount, user_id, created_at
-          FROM segregation
-          WHERE type IN ('additional_expense', 'fixed_expense') AND user_id = $1
-          ORDER BY date DESC, created_at DESC;
-        `;
-        result = await query(fallbackQuery, [userId]);
-      } catch (err2) {
-        return res.status(200).json({ success: true, count: 0, data: [] });
-      }
-    }
-
-    const rows = (result?.rows || []).map((row) => ({
-      ...row,
-      amount: parseFloat(row.amount) || 0,
-      date: row.date ? (typeof row.date === 'string' ? row.date.split('T')[0] : new Date(row.date).toISOString().split('T')[0]) : null,
-    }));
-
-    return res.status(200).json({
-      success: true,
-      count: rows.length,
-      data: rows,
-      company: COMPANY_NAME,
-    });
-  } catch (err) {
-    console.error('GET /api/expenses error:', err);
-    return res.status(500).json({ success: false, message: 'Error retrieving expenses', error: err.message });
-  }
-});
-
-/**
- * POST /api/expenses
- * Create a new expense strictly scoped to user_id
- */
-app.post('/api/expenses', async (req, res) => {
-  req.body.type = req.body.type || 'additional_expense';
-  req.url = '/api/segregation';
-  return app._router.handle(req, res);
-});
-
-/**
- * PUT /api/expenses/:id
- * Update expense strictly scoped to user_id
- */
-app.put('/api/expenses/:id', async (req, res) => {
-  req.url = `/api/segregation/${req.params.id}`;
-  return app._router.handle(req, res);
-});
-
-/**
- * DELETE /api/expenses/:id
- * Delete expense strictly scoped to user_id
- */
-app.delete('/api/expenses/:id', async (req, res) => {
-  req.url = `/api/segregation/${req.params.id}`;
-  return app._router.handle(req, res);
-});
-
-/**
- * GET /api/payments
- * Retrieve payments strictly scoped to authenticated user
- */
-app.get('/api/payments', async (req, res) => {
-  try {
-    const userId = getUserId(req);
-    if (!userId) {
-      return res.status(401).json({ success: false, message: 'Authentication required' });
-    }
-
-    const selectQuery = `
-      SELECT id, name, COALESCE(title, name) AS title, amount, date, status, user_id, created_at
-      FROM payments
-      WHERE user_id = $1
-      ORDER BY date DESC, created_at DESC;
-    `;
-    const result = await query(selectQuery, [userId]);
-    const rows = (result?.rows || []).map((row) => ({
-      ...row,
-      amount: parseFloat(row.amount) || 0,
-      date: row.date ? (typeof row.date === 'string' ? row.date.split('T')[0] : new Date(row.date).toISOString().split('T')[0]) : null,
-    }));
-
-    return res.status(200).json({
-      success: true,
-      count: rows.length,
-      data: rows,
-      company: COMPANY_NAME,
-    });
-  } catch (error) {
-    console.error('GET /api/payments error:', error);
-    return res.status(200).json({ success: true, count: 0, data: [] });
-  }
-});
-
-/**
- * POST /api/payments
- * Create a new payment record strictly scoped to user_id
- */
-app.post('/api/payments', async (req, res) => {
-  try {
-    const userId = getUserId(req);
-    if (!userId) {
-      return res.status(401).json({ success: false, message: 'Authentication required' });
-    }
-
-    const { name, title, amount = 0, date, status = 'completed' } = req.body;
-    const cleanTitle = (title || name || '').trim();
-    if (!cleanTitle) {
-      return res.status(400).json({ success: false, message: 'Payment title/name is required.' });
-    }
-
-    const numericAmount = parseFloat(amount);
-    if (isNaN(numericAmount) || numericAmount < 0) {
-      return res.status(400).json({ success: false, message: 'Amount must be a valid positive number.' });
-    }
-
-    const cleanDate = date || new Date().toISOString().split('T')[0];
-
-    const insertQuery = `
-      INSERT INTO payments (name, title, amount, date, status, user_id)
-      VALUES ($1, $2, $3, $4, $5, $6)
-      RETURNING id, name, title, amount, date, status, user_id, created_at;
-    `;
-    let result = await query(insertQuery, [cleanTitle, cleanTitle, numericAmount, cleanDate, status, userId]);
-
-    let createdRecord;
-    if (result && result.rows && result.rows.length > 0) {
-      createdRecord = {
-        ...result.rows[0],
-        amount: parseFloat(result.rows[0].amount),
-      };
-    } else {
-      createdRecord = {
-        id: Date.now(),
-        name: cleanTitle,
-        title: cleanTitle,
-        amount: numericAmount,
-        date: cleanDate,
-        status,
-        user_id: userId,
-        created_at: new Date().toISOString(),
-      };
-      inMemoryPayments.unshift(createdRecord);
-    }
-
-    return res.status(201).json({
-      success: true,
-      message: 'Payment recorded successfully',
-      data: createdRecord,
-      company: COMPANY_NAME,
-    });
-  } catch (error) {
-    console.error('POST /api/payments error:', error);
-    return res.status(500).json({ success: false, message: 'Error recording payment', error: error.message });
->>>>>>> 05e1eb0e99dc5cb24da27162ad325b8805b5018b
   }
 });
 
