@@ -31,6 +31,9 @@ pool.on('error', (err) => {
  * - segregation (id, name, description, date, time, category, wallet_id, amount, schedule, type, user_id, created_at)
  * - payments (id, name, amount, date, status, user_id, created_at)
  * - goal_wallets & finance_records (referenced in routes)
+ * - split_groups & split_group_members & split_expenses & split_expense_shares & split_settlements
+ * - ai_conversations & ai_chat_messages
+ * - bills, goal_targets, expenses
  */
 const initDatabase = async (client = pool) => {
   if (!process.env.DATABASE_URL) {
@@ -99,6 +102,9 @@ const initDatabase = async (client = pool) => {
         ALTER TABLE wallets ADD COLUMN IF NOT EXISTS description TEXT DEFAULT '';
         ALTER TABLE wallets ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT 'active';
         ALTER TABLE wallets ADD COLUMN IF NOT EXISTS user_id INTEGER;
+        ALTER TABLE wallets ADD COLUMN IF NOT EXISTS user_email VARCHAR(255);
+        CREATE INDEX IF NOT EXISTS idx_wallets_user_id ON wallets(user_id);
+        CREATE INDEX IF NOT EXISTS idx_wallets_user_email ON wallets(user_email);
       `,
     },
     {
@@ -130,6 +136,9 @@ const initDatabase = async (client = pool) => {
         ALTER TABLE segregation ADD COLUMN IF NOT EXISTS schedule VARCHAR(100) DEFAULT 'One-time';
         ALTER TABLE segregation ADD COLUMN IF NOT EXISTS type VARCHAR(50) DEFAULT 'additional_expense';
         ALTER TABLE segregation ADD COLUMN IF NOT EXISTS user_id INTEGER;
+        ALTER TABLE segregation ADD COLUMN IF NOT EXISTS user_email VARCHAR(255);
+        CREATE INDEX IF NOT EXISTS idx_segregation_user_id ON segregation(user_id);
+        CREATE INDEX IF NOT EXISTS idx_segregation_user_email ON segregation(user_email);
       `,
     },
     {
@@ -152,6 +161,9 @@ const initDatabase = async (client = pool) => {
         ALTER TABLE payments ADD COLUMN IF NOT EXISTS date DATE DEFAULT CURRENT_DATE;
         ALTER TABLE payments ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT 'completed';
         ALTER TABLE payments ADD COLUMN IF NOT EXISTS user_id INTEGER;
+        ALTER TABLE payments ADD COLUMN IF NOT EXISTS user_email VARCHAR(255);
+        CREATE INDEX IF NOT EXISTS idx_payments_user_id ON payments(user_id);
+        CREATE INDEX IF NOT EXISTS idx_payments_user_email ON payments(user_email);
       `,
     },
     {
@@ -173,6 +185,9 @@ const initDatabase = async (client = pool) => {
         ALTER TABLE goal_wallets ADD COLUMN IF NOT EXISTS type VARCHAR(100) DEFAULT 'goal';
         ALTER TABLE goal_wallets ADD COLUMN IF NOT EXISTS balance NUMERIC(12, 2) DEFAULT 0.00;
         ALTER TABLE goal_wallets ADD COLUMN IF NOT EXISTS user_id INTEGER;
+        ALTER TABLE goal_wallets ADD COLUMN IF NOT EXISTS user_email VARCHAR(255);
+        CREATE INDEX IF NOT EXISTS idx_goal_wallets_user_id ON goal_wallets(user_id);
+        CREATE INDEX IF NOT EXISTS idx_goal_wallets_user_email ON goal_wallets(user_email);
       `,
     },
     {
@@ -196,6 +211,9 @@ const initDatabase = async (client = pool) => {
 
         ALTER TABLE finance_records ADD COLUMN IF NOT EXISTS wallet_id VARCHAR(100);
         ALTER TABLE finance_records ADD COLUMN IF NOT EXISTS user_id INTEGER;
+        ALTER TABLE finance_records ADD COLUMN IF NOT EXISTS user_email VARCHAR(255);
+        CREATE INDEX IF NOT EXISTS idx_finance_records_user_id ON finance_records(user_id);
+        CREATE INDEX IF NOT EXISTS idx_finance_records_user_email ON finance_records(user_email);
       `,
     },
     {
@@ -290,6 +308,84 @@ const initDatabase = async (client = pool) => {
         CREATE INDEX IF NOT EXISTS idx_ai_chat_messages_user_id ON ai_chat_messages(user_id);
       `,
     },
+    {
+      name: 'bills table',
+      sql: `
+        CREATE TABLE IF NOT EXISTS bills (
+          id SERIAL PRIMARY KEY,
+          name VARCHAR(255) NOT NULL,
+          description TEXT DEFAULT '',
+          date DATE DEFAULT CURRENT_DATE,
+          due_date DATE DEFAULT CURRENT_DATE,
+          time VARCHAR(50),
+          schedule VARCHAR(100) DEFAULT 'Monthly (1st)',
+          category VARCHAR(100) DEFAULT 'Utilities',
+          associated_wallet VARCHAR(100) DEFAULT 'Primary Wallet',
+          amount NUMERIC(12, 2) NOT NULL DEFAULT 0.00,
+          status VARCHAR(50) DEFAULT 'pending',
+          user_id INTEGER REFERENCES users(id) ON DELETE RESTRICT,
+          user_email VARCHAR(255),
+          created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        );
+
+        ALTER TABLE bills ADD COLUMN IF NOT EXISTS due_date DATE DEFAULT CURRENT_DATE;
+        ALTER TABLE bills ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT 'pending';
+        ALTER TABLE bills ADD COLUMN IF NOT EXISTS user_id INTEGER;
+        ALTER TABLE bills ADD COLUMN IF NOT EXISTS user_email VARCHAR(255);
+        CREATE INDEX IF NOT EXISTS idx_bills_user_id ON bills(user_id);
+        CREATE INDEX IF NOT EXISTS idx_bills_user_email ON bills(user_email);
+      `,
+    },
+    {
+      name: 'goal_targets table',
+      sql: `
+        CREATE TABLE IF NOT EXISTS goal_targets (
+          id SERIAL PRIMARY KEY,
+          name VARCHAR(255) NOT NULL,
+          target_amount NUMERIC(12, 2) NOT NULL DEFAULT 0.00,
+          saved_amount NUMERIC(12, 2) NOT NULL DEFAULT 0.00,
+          description TEXT DEFAULT '',
+          status VARCHAR(50) DEFAULT 'in_progress',
+          type VARCHAR(100) DEFAULT 'goal',
+          balance NUMERIC(12, 2) DEFAULT 0.00,
+          user_id INTEGER REFERENCES users(id) ON DELETE RESTRICT,
+          user_email VARCHAR(255),
+          created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        );
+
+        ALTER TABLE goal_targets ADD COLUMN IF NOT EXISTS type VARCHAR(100) DEFAULT 'goal';
+        ALTER TABLE goal_targets ADD COLUMN IF NOT EXISTS balance NUMERIC(12, 2) DEFAULT 0.00;
+        ALTER TABLE goal_targets ADD COLUMN IF NOT EXISTS user_id INTEGER;
+        ALTER TABLE goal_targets ADD COLUMN IF NOT EXISTS user_email VARCHAR(255);
+        CREATE INDEX IF NOT EXISTS idx_goal_targets_user_id ON goal_targets(user_id);
+        CREATE INDEX IF NOT EXISTS idx_goal_targets_user_email ON goal_targets(user_email);
+      `,
+    },
+    {
+      name: 'expenses table',
+      sql: `
+        CREATE TABLE IF NOT EXISTS expenses (
+          id SERIAL PRIMARY KEY,
+          name VARCHAR(255) NOT NULL,
+          description TEXT DEFAULT '',
+          date DATE DEFAULT CURRENT_DATE,
+          time VARCHAR(50),
+          category VARCHAR(100) DEFAULT 'General',
+          associated_wallet VARCHAR(100) DEFAULT 'Primary Wallet',
+          amount NUMERIC(12, 2) NOT NULL DEFAULT 0.00,
+          type VARCHAR(50) DEFAULT 'additional_expense',
+          user_id INTEGER REFERENCES users(id) ON DELETE RESTRICT,
+          user_email VARCHAR(255),
+          created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        );
+
+        ALTER TABLE expenses ADD COLUMN IF NOT EXISTS type VARCHAR(50) DEFAULT 'additional_expense';
+        ALTER TABLE expenses ADD COLUMN IF NOT EXISTS user_id INTEGER;
+        ALTER TABLE expenses ADD COLUMN IF NOT EXISTS user_email VARCHAR(255);
+        CREATE INDEX IF NOT EXISTS idx_expenses_user_id ON expenses(user_id);
+        CREATE INDEX IF NOT EXISTS idx_expenses_user_email ON expenses(user_email);
+      `,
+    },
   ];
 
   for (const step of statements) {
@@ -300,11 +396,9 @@ const initDatabase = async (client = pool) => {
     }
   }
 
-  console.log('✅ [STS FINTECH] PostgreSQL tables verified and initialized: "users", "wallets", "segregation", "payments", "goal_wallets", "finance_records", "split_groups", "ai_conversations".');
+  console.log('✅ [STS FINTECH] PostgreSQL tables verified and initialized: "users", "wallets", "segregation", "payments", "goal_wallets", "finance_records", "split_groups", "ai_conversations", "bills", "goal_targets", "expenses".');
 };
 
 pool.initDatabase = initDatabase;
 
 module.exports = pool;
-
-
