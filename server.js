@@ -78,9 +78,8 @@ const COMPANY_NAME = 'STS FINTECH PRIVATE LIMITED';
 
 const isProduction = process.env.NODE_ENV === 'production';
 
-if (isProduction) {
-  app.set('trust proxy', 1);
-}
+// Trust reverse proxy (e.g. Render, Heroku) so Secure cookies and protocol detection work correctly
+app.set('trust proxy', 1);
 
 // Frontend origin allowlist configuration
 // Supports CLIENT_URLS / CLIENT_URL, local dev ports, and Vercel deployments

@@ -56,13 +56,19 @@ function saveSession(req) {
 }
 
 // Obtain CSRF token
-router.get('/csrf', (req, res) => {
-  req.session.csrfToken ||= createCsrfToken();
+router.get('/csrf', async (req, res, next) => {
+  try {
+    req.session.csrfToken ||= createCsrfToken();
+    await saveSession(req);
 
-  res.json({
-    success: true,
-    csrfToken: req.session.csrfToken,
-  });
+    res.json({
+      success: true,
+      csrfToken: req.session.csrfToken,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
 });
 
 // Register a standard finance member

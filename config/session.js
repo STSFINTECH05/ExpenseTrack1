@@ -24,7 +24,7 @@ const sessionMiddleware = session({
   resave: false,
   saveUninitialized: false,
   rolling: true,
-  proxy: isProduction,
+  proxy: true,
   cookie: {
     httpOnly: true,
     secure: isProduction,
