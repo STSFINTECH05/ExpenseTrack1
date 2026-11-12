@@ -1278,15 +1278,30 @@ async function startServer() {
 
     console.log('[STS FINTECH] Connecting to PostgreSQL...');
 
-    await pool.query('SELECT 1');
+    const maxRetries = 5;
+    const retryDelayMs = 3000;
+    let connected = false;
 
-    console.log('[STS FINTECH] PostgreSQL connection successful.');
-
-    console.log('[STS FINTECH] Initializing database tables...');
-
-    await pool.initDatabase();
-
-    console.log('[STS FINTECH] Database initialization successful.');
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        console.log(`[STS FINTECH] Attempting database connection (attempt ${attempt}/${maxRetries})...`);
+        await pool.query('SELECT 1');
+        console.log('[STS FINTECH] PostgreSQL connection successful.');
+        console.log('[STS FINTECH] Initializing database tables...');
+        await pool.initDatabase();
+        console.log('[STS FINTECH] Database initialization successful.');
+        connected = true;
+        break;
+      } catch (dbErr) {
+        console.warn(`[STS FINTECH] Database connection attempt ${attempt}/${maxRetries} failed: ${dbErr.message}`);
+        if (attempt < maxRetries) {
+          console.log(`[STS FINTECH] Waiting ${retryDelayMs / 1000}s before retrying database connection...`);
+          await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+        } else {
+          throw dbErr;
+        }
+      }
+    }
 
     // Validate Local AI configuration (Step 4.1 - Non-blocking diagnostic)
     try {

@@ -6,23 +6,18 @@ require('dotenv').config();
  * Configured with SSL support for Render, production, and cloud environments.
  */
 const databaseUrl = process.env.DATABASE_URL || '';
-const isProduction = process.env.NODE_ENV === 'production';
-const requiresSsl =
-  isProduction ||
-  databaseUrl.includes('render.com') ||
-  databaseUrl.includes('dpg-') ||
-  databaseUrl.includes('supabase') ||
-  databaseUrl.includes('neon.tech') ||
-  databaseUrl.includes('amazonaws.com') ||
-  databaseUrl.includes('sslmode=require');
+const isLocalhost = databaseUrl.includes('localhost') || databaseUrl.includes('127.0.0.1');
+const requiresSsl = !isLocalhost && Boolean(databaseUrl);
 
 const pool = new Pool({
   connectionString: databaseUrl,
   ssl: requiresSsl ? { rejectUnauthorized: false } : false,
+  connectionTimeoutMillis: 10000,
+  idleTimeoutMillis: 30000,
 });
 
 pool.on('error', (err) => {
-  console.error(' PostgreSQL connection error: ', err.message || err);
+  console.error('[STS FINTECH] Unexpected idle PostgreSQL client error:', err.message || err);
 });
 
 /**
