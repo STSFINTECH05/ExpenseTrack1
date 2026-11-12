@@ -1272,68 +1272,72 @@ app.use((err, req, res, next) => {
 // Server Initialization
 async function startServer() {
   try {
-    if (!process.env.DATABASE_URL) {
-      throw new Error('DATABASE_URL is required. Server startup cancelled.');
-    }
-
-    console.log('[STS FINTECH] Connecting to PostgreSQL...');
-
-    const maxRetries = 5;
-    const retryDelayMs = 3000;
-    let connected = false;
-
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
-      try {
-        console.log(`[STS FINTECH] Attempting database connection (attempt ${attempt}/${maxRetries})...`);
-        await pool.query('SELECT 1');
-        console.log('[STS FINTECH] PostgreSQL connection successful.');
-        console.log('[STS FINTECH] Initializing database tables...');
-        await pool.initDatabase();
-        console.log('[STS FINTECH] Database initialization successful.');
-        connected = true;
-        break;
-      } catch (dbErr) {
-        console.warn(`[STS FINTECH] Database connection attempt ${attempt}/${maxRetries} failed: ${dbErr.message}`);
-        if (attempt < maxRetries) {
-          console.log(`[STS FINTECH] Waiting ${retryDelayMs / 1000}s before retrying database connection...`);
-          await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
-        } else {
-          throw dbErr;
-        }
-      }
-    }
-
-    // Validate Local AI configuration (Step 4.1 - Non-blocking diagnostic)
-    try {
-      const { checkAiHealth, getConfig } = require('./services/aiProvider.service');
-      const aiConfig = getConfig();
-      console.log(`[STS FINTECH AI] Provider configured: '${aiConfig.provider}' (Model: '${aiConfig.model}')`);
-      const aiHealth = await checkAiHealth();
-      if (aiHealth.available) {
-        console.log(`✅ [STS FINTECH AI] Provider '${aiConfig.provider}' verified with model '${aiConfig.model}'.`);
-      } else {
-        console.warn(`⚠️ [STS FINTECH AI] Provider diagnostic: ${aiHealth.message}`);
-        if (aiHealth.instructions) {
-          console.warn(`   Setup instructions: ${aiHealth.instructions}`);
-        }
-      }
-    } catch (aiErr) {
-      console.warn('[STS FINTECH AI] Startup AI validation warning:', aiErr.message);
-    }
-
-    const server = app.listen(PORT, () => {
+    const server = app.listen(PORT, '0.0.0.0', () => {
       console.log('========================================================');
       console.log(`🚀 ${COMPANY_NAME}`);
       console.log('   ExpenseTrack Backend Server Running');
       console.log(`   Port: ${PORT}`);
-      console.log(`   URL: http://localhost:${PORT}`);
+      console.log(`   Bound to: 0.0.0.0:${PORT}`);
       console.log('========================================================');
+
+      // Initialize database connection and tables asynchronously so port is open immediately
+      (async () => {
+        if (!process.env.DATABASE_URL) {
+          console.warn('[STS FINTECH] DATABASE_URL is not set; running without database connection.');
+          return;
+        }
+
+        console.log('[STS FINTECH] Connecting to PostgreSQL in background...');
+        const maxRetries = 5;
+        const retryDelayMs = 3000;
+
+        for (let attempt = 1; attempt <= maxRetries; attempt++) {
+          try {
+            console.log(`[STS FINTECH] Attempting database connection (attempt ${attempt}/${maxRetries})...`);
+            await pool.query('SELECT 1');
+            console.log('[STS FINTECH] PostgreSQL connection successful.');
+            console.log('[STS FINTECH] Initializing database tables...');
+            await pool.initDatabase();
+            console.log('[STS FINTECH] Database initialization successful.');
+            break;
+          } catch (dbErr) {
+            console.warn(`[STS FINTECH] Database connection attempt ${attempt}/${maxRetries} failed: ${dbErr.message}`);
+            if (attempt < maxRetries) {
+              console.log(`[STS FINTECH] Waiting ${retryDelayMs / 1000}s before retrying database connection...`);
+              await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+            } else {
+              console.error('[STS FINTECH] Database connection failed after all retries. The server will keep running to serve requests and retry upon incoming operations.');
+            }
+          }
+        }
+      })().catch((err) => {
+        console.error('[STS FINTECH] Background database initialization error:', err.message);
+      });
+
+      // Validate Local AI configuration (Step 4.1 - Non-blocking diagnostic)
+      (async () => {
+        try {
+          const { checkAiHealth, getConfig } = require('./services/aiProvider.service');
+          const aiConfig = getConfig();
+          console.log(`[STS FINTECH AI] Provider configured: '${aiConfig.provider}' (Model: '${aiConfig.model}')`);
+          const aiHealth = await checkAiHealth();
+          if (aiHealth.available) {
+            console.log(`✅ [STS FINTECH AI] Provider '${aiConfig.provider}' verified with model '${aiConfig.model}'.`);
+          } else {
+            console.warn(`⚠️ [STS FINTECH AI] Provider diagnostic: ${aiHealth.message}`);
+            if (aiHealth.instructions) {
+              console.warn(`   Setup instructions: ${aiHealth.instructions}`);
+            }
+          }
+        } catch (aiErr) {
+          console.warn('[STS FINTECH AI] Startup AI validation warning:', aiErr.message);
+        }
+      })().catch(() => {});
     });
 
     return server;
   } catch (error) {
-    console.error('[STS FINTECH] Server startup failed:', error.message);
-    await pool.end().catch(() => {});
+    console.error('[STS FINTECH] Server startup failed to bind port:', error.message);
     process.exitCode = 1;
     throw error;
   }
